@@ -1,17 +1,36 @@
-# pages/1_Ocorrências_Detalhadas.py (FINAL: Adição de Multiselect nos filtros e ajuste de altura)
+# pages/1_Ocorrências_Detalhadas.py (AJUSTADO PARA GITHUB)
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import numpy as np
+import requests             # NOVO: Necessário para buscar URLs do GitHub
+from io import StringIO     # NOVO: Necessário para ler o conteúdo da resposta HTTP como um arquivo CSV
 
 # --- Constantes e Configurações ---
 st.set_page_config(
     layout="wide", page_title="Dashboard Profarma - Ocorrências")
 COR_PRINCIPAL_VERDE = "#70C247"
-COR_CONTRASTE = "#4CAF50"
+COR_CONTRASTE = "#4CAF50" # Cor usada para contrastes (Marcações Ímpares)
+
+# --- URLs BRUTAS DO GITHUB (AJUSTE CRÍTICO) ---
+REPO_URL_BASE = 'https://raw.githubusercontent.com/oliveirafabio8813-design/meu-dashboard-profarma/main/Dashboard/'
+URL_OCORRENCIAS = REPO_URL_BASE + 'Relatorio_OcorrenciasNoPonto.xlsx%20-%20Ocorr%C3%AAnciasnoPonto.csv'
+URL_BANCO_HORAS_RESUMO = REPO_URL_BASE + 'Relatorio_ContaCorrenteBancoDeHorasResumo.xlsx%20-%20ContaCorrenteBancodeHorasResum.csv' # Mantido para carregar Estabelecimento/Departamento
+
 
 # --- Funções de Processamento de Dados ---
+
+@st.cache_data(show_spinner="Carregando dados do GitHub...")
+def load_data_from_github(url):
+    """Carrega o arquivo CSV do link Raw do GitHub."""
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        return pd.read_csv(StringIO(response.text), sep=',')
+    except Exception as e:
+        st.error(f"⚠️ Erro ao carregar dados do GitHub ({url}): {e}")
+        return pd.DataFrame()
 
 
 def e_marcacoes_impar(marcacoes):
@@ -38,8 +57,15 @@ def convert_to_hours(time_str):
 
 @st.cache_data
 def load_data():
+    df_ocorrencias = load_data_from_github(URL_OCORRENCIAS)
+    df_banco_horas = load_data_from_github(URL_BANCO_HORAS_RESUMO)
+    
+    if df_ocorrencias.empty:
+        st.error("Falha ao carregar o DataFrame de Ocorrências do GitHub.")
+        st.stop()
+        
     try:
-        df_ocorrencias = pd.read_excel('Relatorio_OcorrenciasNoPonto.xlsx')
+        # Processamento de Ocorrências (Mantido do original)
         df_ocorrencias['Data'] = pd.to_datetime(
             df_ocorrencias['Data'], errors='coerce', dayfirst=True)
         df_ocorrencias['is_impar'] = df_ocorrencias['Marcacoes'].apply(
@@ -47,17 +73,14 @@ def load_data():
         df_ocorrencias['is_sem_marcacao'] = df_ocorrencias['Ocorrencia'].isin(
             ['Sem marcação de entrada', 'Sem marcação de saída'])
     except Exception as e:
-        st.error(f"Erro ao carregar ou processar dados de Ocorrências: {e}")
-        st.stop()
-    try:
-        df_banco_horas = pd.read_excel(
-            'Relatorio_ContaCorrenteBancoDeHorasResumo.xlsx')
-        df_banco_horas['SaldoFinal_Horas'] = df_banco_horas['SaldoFinal'].apply(
-            convert_to_hours)
-    except Exception as e:
-        st.error(f"Erro ao carregar ou processar dados de Banco de Horas: {e}")
+        st.error(f"Erro ao processar dados de Ocorrências: {e}")
         st.stop()
 
+    if not df_banco_horas.empty:
+        # Processamento de Banco de Horas (Mantido o necessário para filtros)
+        df_banco_horas['SaldoFinal_Horas'] = df_banco_horas['SaldoFinal'].apply(
+            convert_to_hours)
+    
     return df_ocorrencias, df_banco_horas
 
 
@@ -113,8 +136,8 @@ with col_filter_button:
 with col_filter_est:
     todos_estabelecimentos = sorted(
         list(df_ocorrencias['Estabelecimento'].unique()))
-
-    selected_establishments = st.multiselect(  # MUDANÇA PARA MULTISELECT
+    selected_establishments = st.multiselect(
+        # MUDANÇA PARA MULTISELECT
         'Estabelecimento:',
         options=todos_estabelecimentos,
         # Usa o estado atual
@@ -124,10 +147,12 @@ with col_filter_est:
     )
 
 # 2. Filtragem Inicial por Estabelecimento
-if selected_establishments:  # Se a lista não estiver vazia
+if selected_establishments:
+    # Se a lista não estiver vazia
     df_ocorrencias_filtrado = df_ocorrencias[df_ocorrencias['Estabelecimento'].isin(
         selected_establishments)].copy()
-else:  # Se a lista estiver vazia, usa o DataFrame completo
+else:
+    # Se a lista estiver vazia, usa o DataFrame completo
     df_ocorrencias_filtrado = df_ocorrencias.copy()
 
 # 3. Filtro de Departamento (Multiselect, depende do Estabelecimento)
@@ -139,191 +164,182 @@ with col_filter_dep:
     # --- LÓGICA DE LIMPEZA DE DEPARTAMENTO ---
     # Verifica se algum departamento selecionado não existe mais no escopo atual
     current_selection_dep = st.session_state['selected_department_ocorrencias']
-
-    # Filtra a seleção atual para manter apenas os que estão disponíveis (em todos_departamentos)
     new_selection_dep = [
         dep for dep in current_selection_dep if dep in todos_departamentos]
-
-    # Se houve mudança na seleção, atualiza o st.session_state
     if set(current_selection_dep) != set(new_selection_dep):
         st.session_state['selected_department_ocorrencias'] = new_selection_dep
-    # --- FIM DA LÓGICA DE LIMPEZA ---
 
-    selected_departments = st.multiselect(  # MUDANÇA PARA MULTISELECT
+    selected_departments = st.multiselect(
         'Departamento:',
         options=todos_departamentos,
-        # Usa o estado atualizado (limpo) como default
         default=st.session_state['selected_department_ocorrencias'],
-        key='selected_department_ocorrencias'  # Adiciona chave para controle de estado
+        key='selected_department_ocorrencias'
     )
 
 # 4. Filtragem Final por Departamento
-if selected_departments:  # Se a lista não estiver vazia
+if selected_departments:
     df_ocorrencias_filtrado = df_ocorrencias_filtrado[df_ocorrencias_filtrado['Departamento'].isin(
         selected_departments)].copy()
 
-# --- LÓGICA DE TAMANHO DE GRÁFICO CONDICIONAL ---
-# Filtros ativos se selected_establishments OU selected_departments não estiverem vazios
-filtros_ativos = bool(selected_establishments or selected_departments)
 
-# Define a altura base.
-BASE_HEIGHT = 400
-if filtros_ativos:
-    # Se houver filtros, o gráfico detalha apenas um escopo menor.
-    CHART_HEIGHT = 250
-else:
-    # Se não houver filtros, o gráfico mostra todos os estabelecimentos.
-    CHART_HEIGHT = BASE_HEIGHT
-# Fim da Lógica de Tamanho de Gráfico
-
-# --- GRÁFICOS DE OCARRÊNCIAS (Dados agora filtrados por ESTAB e DEP) ---
+# --- ANÁLISE GERAL DOS DADOS FILTRADOS ---
 st.markdown('---')
-st.subheader('Análise Gráfica por Estabelecimento')
+st.subheader('Resumo das Ocorrências (Filtros Aplicados)')
 
-# Processamento de dados para gráficos (Continua a agrupar por Estabelecimento, mas com dados mais filtrados)
-resultados = pd.DataFrame(
-    columns=['Estabelecimento', 'ContagemFaltas', 'ContagemMarcacoesImpares'])
+# Cálculos de KPIs
+total_faltas_filtrado = df_ocorrencias_filtrado['is_falta_nao_justificada'].sum()
+total_impares_filtrado = df_ocorrencias_filtrado['is_impar'].sum()
+total_sem_marcacao_filtrado = df_ocorrencias_filtrado['is_sem_marcacao'].sum()
+total_marcacoes_impares_filtrado = int(
+    total_impares_filtrado + total_sem_marcacao_filtrado)
 
-# Agrupa pelos estabelecimentos que estão no DF filtrado (serão os selecionados ou todos)
-grupos = df_ocorrencias_filtrado.groupby('Estabelecimento')
 
-for estabelecimento, grupo in grupos:
-    filtro_falta = (grupo['Ocorrencia'] == 'Falta') & (
-        grupo['Justificativa'] == 'Falta')
-    contagem_falta = filtro_falta.sum()
+col_kpi_1, col_kpi_2, col_kpi_3, _ = st.columns(4)
 
-    contagem_impares_base = grupo['is_impar'].sum()
-    contagem_sem_marcacao = grupo['is_sem_marcacao'].sum()
-    contagem_marcacoes_impares = contagem_impares_base + contagem_sem_marcacao
+with col_kpi_1:
+    st.metric(
+        label="Total de Faltas Não Justificadas",
+        value=f"{int(total_faltas_filtrado)}",
+        delta_color="off"
+    )
 
-    resultados.loc[len(resultados)] = [estabelecimento,
-                                       contagem_falta, contagem_marcacoes_impares]
+with col_kpi_2:
+    st.metric(
+        label="Total de Marcações Ímpares/Ausentes",
+        value=f"{total_marcacoes_impares_filtrado}",
+        delta_color="off"
+    )
 
-resultados_faltas = resultados.sort_values(
-    by='ContagemFaltas', ascending=False)
-resultados_impares = resultados.sort_values(
-    by='ContagemMarcacoesImpares', ascending=False)
 
-col1, col2 = st.columns(2)
-with col1:
-    # Título simplificado, pois o filtro já indica o escopo
-    st.subheader('Gráfico de Faltas')
-    if not resultados_faltas.empty:
-        fig_faltas = px.bar(
-            resultados_faltas,
-            y='Estabelecimento',
-            x='ContagemFaltas',
-            orientation='h',
-            title='Total de Faltas no Escopo Selecionado',
-            labels={'ContagemFaltas': 'Total de Ocorrências (Faltas)'},
-            color_discrete_sequence=[COR_CONTRASTE],
-            category_orders={
-                'Estabelecimento': resultados_faltas['Estabelecimento'].tolist()},
-            height=CHART_HEIGHT  # APLICAÇÃO DA ALTURA CONDICIONAL
+# --- GRÁFICO DE BARRAS DE OCORRÊNCIAS POR DEPARTAMENTO ---
+st.markdown('---')
+st.subheader('Ocorrências por Departamento (Detalhe)')
+
+
+# 1. Agrupamento por Departamento (Faltas e Ímpares)
+df_chart = df_ocorrencias_filtrado.groupby('Departamento').agg(
+    Total_Faltas=('is_falta_nao_justificada', 'sum'),
+    Total_Impares=('is_impar', 'sum'),
+    Total_Sem_Marcacao=('is_sem_marcacao', 'sum')
+).reset_index()
+
+df_chart['Total_Ocorrencias'] = df_chart['Total_Faltas'] + \
+    df_chart['Total_Impares'] + df_chart['Total_Sem_Marcacao']
+
+# 2. Remover departamentos sem ocorrências no filtro
+df_chart = df_chart[df_chart['Total_Ocorrencias'] > 0].sort_values(
+    'Total_Ocorrencias', ascending=True
+)
+
+if not df_chart.empty:
+    # CÁLCULO DA ALTURA DINÂMICA
+    num_departamentos = len(df_chart)
+    # 40px por barra + 80px de margem, limitado a 700px
+    chart_height = min(num_departamentos * 40 + 80, 700)
+
+    fig_departamento = px.bar(
+        df_chart,
+        y='Departamento',
+        x=['Total_Faltas', 'Total_Impares', 'Total_Sem_Marcacao'],
+        orientation='h',
+        color_discrete_sequence=[
+            COR_CONTRASTE, '#ffc107', '#17a2b8'],
+        labels={'value': 'Total de Ocorrências',
+                'Departamento': 'Departamento',
+                'variable': 'Tipo de Ocorrência'},
+        template='plotly_white',
+        height=chart_height
+    )
+
+    # Adiciona a soma total como texto no final de cada barra
+    fig_departamento.update_traces(
+        # text=df_chart['Total_Ocorrencias'], # Apenas se usar a soma total
+        textposition='outside',
+        cliponaxis=False
+    )
+    # Configurações de layout
+    fig_departamento.update_layout(
+        xaxis_title="Total de Ocorrências",
+        legend_title_text='Tipo',
+        uniformtext_minsize=8,
+        uniformtext_mode='hide',
+    )
+    st.plotly_chart(fig_departamento, use_container_width=True)
+else:
+    st.info("Nenhuma ocorrência encontrada para os filtros aplicados.")
+
+
+# --- DETALHE DE OCORRÊNCIAS (TABELA) ---
+st.markdown('---')
+st.subheader('Detalhamento por Colaborador')
+
+
+# 1. Tabela de Faltas
+faltas_df = df_ocorrencias_filtrado[
+    df_ocorrencias_filtrado['is_falta_nao_justificada'] == 1
+].copy()
+
+faltas_df = faltas_df[[
+    'Matricula', 'Nome', 'Data', 'Departamento', 'Ocorrencia'
+]]
+faltas_df.columns = ['Matrícula', 'Nome do Funcionário',
+                     'Data da Falta', 'Departamento', 'Tipo']
+faltas_df['Data da Falta'] = faltas_df['Data da Falta'].dt.strftime(
+    '%d/%m/%Y')
+# Ordenação
+faltas_df = faltas_df.sort_values(
+    by=['Nome do Funcionário', 'Data da Falta']).reset_index(drop=True)
+
+
+# 2. Tabela de Marcações Ímpares/Ausentes
+impares_df = df_ocorrencias_filtrado[
+    df_ocorrencias_filtrado['is_impar'] | df_ocorrencias_filtrado['is_sem_marcacao']
+].copy()
+
+impares_df = impares_df[[
+    'Matricula', 'Nome', 'Data', 'Departamento', 'Marcacoes'
+]]
+impares_df.columns = ['Matrícula', 'Nome do Funcionário',
+                      'Data da Marcação Ímpar', 'Departamento', 'Marcações Registradas']
+
+impares_df = impares_df.sort_values(
+    by=['Nome do Funcionário', 'Data da Marcação Ímpar']).reset_index(drop=True)
+impares_df['Data da Marcação Ímpar'] = impares_df['Data da Marcação Ímpar'].dt.strftime(
+    '%d/%m/%Y')
+
+detalhe_col1, detalhe_col2 = st.columns(2)
+
+# --- Coluna 1: Faltas ---
+with detalhe_col1:
+    st.subheader("Faltas Detalhadas")
+    if not faltas_df.empty:
+        # CÁLCULO DA ALTURA DINÂMICA PARA FALTAS
+        num_rows = len(faltas_df)
+        dynamic_height = min(num_rows * 35 + 40, 500)
+
+        st.dataframe(
+            faltas_df,
+            use_container_width=True,
+            hide_index=True,
+            height=dynamic_height
         )
-        fig_faltas.update_traces(texttemplate='%{x}', textposition='outside')
-        st.plotly_chart(fig_faltas, use_container_width=True)
     else:
-        st.info("Nenhuma ocorrência de Falta para os filtros selecionados.")
+        st.info("Nenhuma falta encontrada para este filtro.")
 
+# --- Coluna 2: Marcações Ímpares ---
+with detalhe_col2:
+    st.subheader("Marcações Ímpares Detalhadas")
+    if not impares_df.empty:
+        # CÁLCULO DA ALTURA DINÂMICA PARA MARCAÇÕES ÍMPARES
+        num_rows = len(impares_df)
+        dynamic_height = min(num_rows * 35 + 40, 500)
 
-with col2:
-    st.subheader('Gráfico de Marcações Ímpares')
-    if not resultados_impares.empty:
-        fig_impares = px.bar(
-            resultados_impares,
-            y='Estabelecimento',
-            x='ContagemMarcacoesImpares',
-            orientation='h',
-            title='Total de Marcações Ímpares no Escopo Selecionado',
-            labels={
-                'ContagemMarcacoesImpares': 'Total de Ocorrências (Marcações Ímpar)'},
-            color_discrete_sequence=[COR_PRINCIPAL_VERDE],
-            category_orders={
-                'Estabelecimento': resultados_impares['Estabelecimento'].tolist()},
-            height=CHART_HEIGHT  # APLICAÇÃO DA ALTURA CONDICIONAL
+        st.dataframe(
+            impares_df,
+            use_container_width=True,
+            hide_index=True,
+            height=dynamic_height
         )
-        fig_impares.update_traces(texttemplate='%{x}', textposition='outside')
-        st.plotly_chart(fig_impares, use_container_width=True)
     else:
-        st.info("Nenhuma ocorrência de Marcação Ímpar para os filtros selecionados.")
+        st.info("Nenhuma marcação ímpar/ausente encontrada para este filtro.")
 
-
-# --- DETALHAMENTO DE OCORRÊNCIAS (Com Altura Dinâmica e colunas ajustadas) ---
-
-# O detalhamento só faz sentido se a filtragem resultou em um escopo menor (ou seja, filtros ativos)
-if filtros_ativos:
-    st.markdown('---')
-
-    # Monta o título dinamicamente
-    estabs_title = ", ".join(
-        selected_establishments) if selected_establishments else "Todos"
-    deps_title = ", ".join(
-        selected_departments) if selected_departments else "Todos"
-    st.subheader(
-        f"Detalhes de Ocorrências para: **{estabs_title}** / **{deps_title}**")
-
-    # Processamento para Faltas
-    faltas_df = df_ocorrencias_filtrado[
-        (df_ocorrencias_filtrado['Ocorrencia'] == 'Falta') &
-        (df_ocorrencias_filtrado['Justificativa'] == 'Falta')
-    ].copy()
-
-    # Colunas: Nome do Funcionário e Data da Falta
-    faltas_df = faltas_df[['Nome', 'Data']]
-    faltas_df.columns = ['Nome do Funcionário', 'Data da Falta']
-
-    faltas_df = faltas_df.sort_values(
-        by=['Nome do Funcionário', 'Data da Falta']).reset_index(drop=True)
-    faltas_df['Data da Falta'] = faltas_df['Data da Falta'].dt.strftime(
-        '%d/%m/%Y')
-
-    # Processamento para Marcações Ímpares
-    impares_df = df_ocorrencias_filtrado[
-        df_ocorrencias_filtrado['is_impar'] | df_ocorrencias_filtrado['is_sem_marcacao']
-    ].copy()
-
-    # Colunas: Nome do Funcionário e Data da Marcação Ímpar
-    impares_df = impares_df[['Nome', 'Data']]
-    impares_df.columns = ['Nome do Funcionário', 'Data da Marcação Ímpar']
-
-    impares_df = impares_df.sort_values(
-        by=['Nome do Funcionário', 'Data da Marcação Ímpar']).reset_index(drop=True)
-    impares_df['Data da Marcação Ímpar'] = impares_df['Data da Marcação Ímpar'].dt.strftime(
-        '%d/%m/%Y')
-
-    detalhe_col1, detalhe_col2 = st.columns(2)
-
-    # --- Coluna 1: Faltas ---
-    with detalhe_col1:
-        st.subheader("Faltas Detalhadas")
-        if not faltas_df.empty:
-            # CÁLCULO DA ALTURA DINÂMICA PARA FALTAS
-            num_rows = len(faltas_df)
-            dynamic_height = min(num_rows * 35 + 40, 500)
-
-            st.dataframe(
-                faltas_df,
-                use_container_width=True,
-                hide_index=True,
-                height=dynamic_height
-            )
-        else:
-            st.info("Nenhuma falta encontrada para este filtro.")
-
-    # --- Coluna 2: Marcações Ímpares ---
-    with detalhe_col2:
-        st.subheader("Marcações Ímpares Detalhadas")
-        if not impares_df.empty:
-            # CÁLCULO DA ALTURA DINÂMICA PARA MARCAÇÕES ÍMPARES
-            num_rows = len(impares_df)
-            dynamic_height = min(num_rows * 35 + 40, 500)
-
-            st.dataframe(
-                impares_df,
-                use_container_width=True,
-                hide_index=True,
-                height=dynamic_height
-            )
-        else:
-            st.info("Nenhuma marcação ímpar encontrada para este filtro.")
