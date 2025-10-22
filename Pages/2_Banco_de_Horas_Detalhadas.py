@@ -352,10 +352,10 @@ detalhes_positivo_df = df_banco_horas_filtrado[df_banco_horas_filtrado['SaldoFin
 detalhes_positivo_df = detalhes_positivo_df.sort_values(
     'SaldoFinal_Horas', ascending=False)
 detalhes_positivo_df = detalhes_positivo_df[[
-    'Matricula', 'Nome', 'Departamento', 'Saldo Final (HH:MM)'
+    'Matricula', 'Nome', 'Departamento', 'Cargo', 'Saldo Final (HH:MM)' 
 ]]
 detalhes_positivo_df.columns = [
-    'Matrícula', 'Nome do Funcionário', 'Departamento', 'Saldo Positivo'
+    'Matrícula', 'Nome do Funcionário', 'Departamento', 'Cargo', 'Saldo Positivo'
 ]
 
 
@@ -364,10 +364,10 @@ detalhes_negativo_df = df_banco_horas_filtrado[df_banco_horas_filtrado['SaldoFin
 detalhes_negativo_df = detalhes_negativo_df.sort_values(
     'SaldoFinal_Horas', ascending=True)
 detalhes_negativo_df = detalhes_negativo_df[[
-    'Matricula', 'Nome', 'Departamento', 'Saldo Final (HH:MM)'
+    'Matricula', 'Nome', 'Departamento', 'Cargo', 'Saldo Final (HH:MM)'
 ]]
 detalhes_negativo_df.columns = [
-    'Matrícula', 'Nome do Funcionário', 'Departamento', 'Saldo Negativo'
+    'Matrícula', 'Nome do Funcionário', 'Departamento', 'Cargo', 'Saldo Negativo'
 ]
 
 # 3. Tabela de Pagamentos
@@ -375,10 +375,10 @@ detalhes_pagamentos_df = df_banco_horas_filtrado[df_banco_horas_filtrado['Pagame
 detalhes_pagamentos_df = detalhes_pagamentos_df.sort_values(
     'Pagamentos_Horas', ascending=False)
 detalhes_pagamentos_df = detalhes_pagamentos_df[[
-    'Matricula', 'Nome', 'Departamento', 'Pagamentos (HH:MM)'
+    'Matricula', 'Nome', 'Departamento', 'Cargo', 'Pagamentos (HH:MM)'
 ]]
 detalhes_pagamentos_df.columns = [
-    'Matrícula', 'Nome do Funcionário', 'Departamento', 'Pagamentos'
+    'Matrícula', 'Nome do Funcionário', 'Departamento', 'Cargo', 'Pagamentos'
 ]
 
 # 4. Tabela de Descontos
@@ -386,10 +386,10 @@ detalhes_descontos_df = df_banco_horas_filtrado[df_banco_horas_filtrado['Descont
 detalhes_descontos_df = detalhes_descontos_df.sort_values(
     'Descontos_Horas', ascending=True)
 detalhes_descontos_df = detalhes_descontos_df[[
-    'Matricula', 'Nome', 'Departamento', 'Descontos (HH:MM)'
+    'Matricula', 'Nome', 'Departamento', 'Cargo', 'Descontos (HH:MM)'
 ]]
 detalhes_descontos_df.columns = [
-    'Matrícula', 'Nome do Funcionário', 'Departamento', 'Descontos'
+    'Matrícula', 'Nome do Funcionário', 'Departamento', 'Cargo', 'Descontos'
 ]
 
 
@@ -460,5 +460,6 @@ with detalhe_mov_col2:
         )
     else:
         st.info("Nenhum desconto de horas encontrado para este filtro.")
+
 
 
