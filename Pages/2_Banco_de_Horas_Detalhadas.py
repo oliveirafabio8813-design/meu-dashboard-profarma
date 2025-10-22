@@ -1,9 +1,11 @@
-# pages/2_Banco_de_Horas_Detalhadas.py (Com a correção de sinal e NOVO GRÁFICO DE PAGAMENTOS/DESCONTOS)
+# pages/2_Banco_de_Horas_Detalhadas.py (AJUSTADO PARA GITHUB)
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import numpy as np
+import requests             # NOVO: Necessário para buscar URLs do GitHub
+from io import StringIO     # NOVO: Necessário para ler o conteúdo da resposta HTTP como um arquivo CSV
 
 # --- Constantes e Configurações ---
 st.set_page_config(
@@ -11,7 +13,24 @@ st.set_page_config(
 COR_PRINCIPAL_VERDE = "#70C247"  # Cor para Crédito/Pagamentos
 COR_CONTRASTE = "#dc3545"  # Cor para Débito/Descontos
 
+# --- URLs BRUTAS DO GITHUB (AJUSTE CRÍTICO) ---
+REPO_URL_BASE = 'https://raw.githubusercontent.com/oliveirafabio8813-design/meu-dashboard-profarma/main/Dashboard/'
+URL_BANCO_HORAS_RESUMO = REPO_URL_BASE + 'Relatorio_ContaCorrenteBancoDeHorasResumo.xlsx%20-%20ContaCorrenteBancodeHorasResum.csv'
+URL_OCORRENCIAS = REPO_URL_BASE + 'Relatorio_OcorrenciasNoPonto.xlsx%20-%20Ocorr%C3%AAnciasnoPonto.csv' # Mantido para carregar na load_data, se necessário
+
+
 # --- Funções e Carregamento de Dados ---
+
+@st.cache_data(show_spinner="Carregando dados do GitHub...")
+def load_data_from_github(url):
+    """Carrega o arquivo CSV do link Raw do GitHub."""
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        return pd.read_csv(StringIO(response.text), sep=',')
+    except Exception as e:
+        st.error(f"⚠️ Erro ao carregar dados do GitHub ({url}): {e}")
+        return pd.DataFrame()
 
 
 def convert_to_hours(time_str):
@@ -49,19 +68,23 @@ def format_decimal_to_hhmm(decimal_hours):
 
 @st.cache_data
 def load_data():
-    try:
-        df_ocorrencias = pd.read_excel('Relatorio_OcorrenciasNoPonto.xlsx')
-        # Tenta carregar os dados
-        df_ocorrencias['Data'] = pd.to_datetime(
-            df_ocorrencias['Data'], errors='coerce', dayfirst=True)
-    except Exception as e:
-        # st.error(f"Erro ao carregar ou processar dados de Ocorrências: {e}")
+    df_ocorrencias = load_data_from_github(URL_OCORRENCIAS)
+    df_banco_horas = load_data_from_github(URL_BANCO_HORAS_RESUMO)
+    
+    if df_banco_horas.empty:
+        st.error("Falha ao carregar o DataFrame de Banco de Horas do GitHub.")
         st.stop()
+        
+    if not df_ocorrencias.empty:
+        try:
+            # Tenta processar Ocorrências (Mantido do original)
+            df_ocorrencias['Data'] = pd.to_datetime(
+                df_ocorrencias['Data'], errors='coerce', dayfirst=True)
+        except Exception:
+             # Se der erro no processamento, segue sem o df_ocorrencias
+             df_ocorrencias = pd.DataFrame()
 
     try:
-        df_banco_horas = pd.read_excel(
-            'Relatorio_ContaCorrenteBancoDeHorasResumo.xlsx')
-
         # 1. Converte Saldo Final (mantém o sinal original)
         df_banco_horas['SaldoFinal_Horas'] = df_banco_horas['SaldoFinal'].apply(
             convert_to_hours)
@@ -81,7 +104,7 @@ def load_data():
             format_decimal_to_hhmm)
 
     except Exception as e:
-        # st.error(f"Erro ao carregar ou processar dados de Banco de Horas: {e}")
+        st.error(f"Erro ao processar dados de Banco de Horas: {e}")
         st.stop()
 
     return df_ocorrencias, df_banco_horas
@@ -153,14 +176,11 @@ else:
 with col_filter_dep:
     todos_departamentos = sorted(
         list(df_banco_horas_filtrado['Departamento'].unique()))
-
     current_selection_dep = st.session_state['selected_department_banco']
     new_selection_dep = [
         dep for dep in current_selection_dep if dep in todos_departamentos]
-
     if set(current_selection_dep) != set(new_selection_dep):
         st.session_state['selected_department_banco'] = new_selection_dep
-
     selected_departments = st.multiselect(
         'Departamento:',
         options=todos_departamentos,
@@ -174,253 +194,263 @@ if selected_departments:
 
 # --- LÓGICA DE TAMANHO DE GRÁFICO CONDICIONAL (Inalterado) ---
 filtros_ativos = bool(selected_establishments or selected_departments)
-
 BASE_HEIGHT = 400
 if filtros_ativos:
     CHART_HEIGHT = 250
 else:
     CHART_HEIGHT = BASE_HEIGHT
 
-
 # --- GRÁFICOS DE SALDO FINAL (Inalterado) ---
 st.markdown('---')
 st.subheader('Análise Gráfica por Saldo Final (Acúmulo)')
-
 df_positivo = df_banco_horas_filtrado[df_banco_horas_filtrado['SaldoFinal_Horas'] > 0]
 df_negativo = df_banco_horas_filtrado[df_banco_horas_filtrado['SaldoFinal_Horas'] < 0]
 
-ranking_positivo = df_positivo.groupby('Estabelecimento')[
-    'SaldoFinal_Horas'].sum().sort_values(ascending=False).reset_index()
-ranking_negativo = df_negativo.groupby('Estabelecimento')[
-    'SaldoFinal_Horas'].sum().sort_values(ascending=True).reset_index()
+# Gráfico de Saldo Positivo
+df_chart_positivo = df_positivo.groupby('Estabelecimento')[
+    'SaldoFinal_Horas'].sum().reset_index(name='Total Horas Positivas')
+df_chart_positivo = df_chart_positivo.sort_values(
+    'Total Horas Positivas', ascending=True)
 
-col_ranking_pos, col_ranking_neg = st.columns(2)
+df_chart_positivo['Total Horas Positivas (HH:MM)'] = df_chart_positivo['Total Horas Positivas'].apply(
+    format_decimal_to_hhmm)
 
-with col_ranking_pos:
-    st.markdown('##### Ranking de Horas Positivas')
-    if not ranking_positivo.empty:
-        fig_pos = px.bar(
-            ranking_positivo,
-            x='SaldoFinal_Horas',
+col_chart_pos, col_chart_neg = st.columns(2)
+
+with col_chart_pos:
+    st.markdown('#### Saldo Positivo por Estabelecimento (Crédito)')
+    if not df_chart_positivo.empty:
+        fig_positivo = px.bar(
+            df_chart_positivo,
             y='Estabelecimento',
+            x='Total Horas Positivas',
             orientation='h',
-            title='Total de Horas Positivas no Escopo Selecionado',
-            labels={'SaldoFinal_Horas': 'Total de Horas (Positivas)'},
-            color_discrete_sequence=[COR_PRINCIPAL_VERDE],
-            category_orders={
-                'Estabelecimento': ranking_positivo['Estabelecimento'].tolist()},
-            height=CHART_HEIGHT
+            text='Total Horas Positivas (HH:MM)',
+            color='Total Horas Positivas',
+            color_continuous_scale=px.colors.sequential.Greens,
+            labels={'Total Horas Positivas': 'Total de Horas'},
+            template='plotly_white',
+            height=CHART_HEIGHT,
         )
-        fig_pos.update_traces(texttemplate='%{x:.2f}h', textposition='outside')
-        st.plotly_chart(fig_pos, use_container_width=True)
+        fig_positivo.update_traces(textposition='outside', cliponaxis=False)
+        fig_positivo.update_layout(xaxis_title=None, showlegend=False)
+        st.plotly_chart(fig_positivo, use_container_width=True)
     else:
-        st.info("Nenhum saldo positivo para o filtro selecionado.")
+        st.info("Nenhum saldo positivo encontrado para este filtro.")
 
-with col_ranking_neg:
-    st.markdown('##### Ranking de Horas Negativas')
-    if not ranking_negativo.empty:
-        fig_neg = px.bar(
-            ranking_negativo,
-            x='SaldoFinal_Horas',
+# Gráfico de Saldo Negativo
+df_chart_negativo = df_negativo.groupby('Estabelecimento')[
+    'SaldoFinal_Horas'].sum().reset_index(name='Total Horas Negativas')
+df_chart_negativo = df_chart_negativo.sort_values(
+    'Total Horas Negativas', ascending=False)
+
+df_chart_negativo['Total Horas Negativas (HH:MM)'] = df_chart_negativo['Total Horas Negativas'].apply(
+    format_decimal_to_hhmm)
+
+with col_chart_neg:
+    st.markdown('#### Saldo Negativo por Estabelecimento (Débito)')
+    if not df_chart_negativo.empty:
+        fig_negativo = px.bar(
+            df_chart_negativo,
             y='Estabelecimento',
+            x='Total Horas Negativas',
             orientation='h',
-            title='Total de Horas Negativas no Escopo Selecionado',
-            labels={'SaldoFinal_Horas': 'Total de Horas (Negativas)'},
-            color_discrete_sequence=[COR_CONTRASTE],
-            category_orders={
-                'Estabelecimento': ranking_negativo['Estabelecimento'].tolist()},
-            height=CHART_HEIGHT
+            text='Total Horas Negativas (HH:MM)',
+            color='Total Horas Negativas',
+            color_continuous_scale=px.colors.sequential.Reds_r,
+            labels={'Total Horas Negativas': 'Total de Horas'},
+            template='plotly_white',
+            height=CHART_HEIGHT,
         )
-        fig_neg.update_traces(texttemplate='%{x:.2f}h', textposition='outside')
-        st.plotly_chart(fig_neg, use_container_width=True)
+        fig_negativo.update_traces(textposition='outside', cliponaxis=False)
+        fig_negativo.update_layout(xaxis_title=None, showlegend=False)
+        st.plotly_chart(fig_negativo, use_container_width=True)
     else:
-        st.info("Nenhum saldo negativo para o filtro selecionado.")
+        st.info("Nenhum saldo negativo encontrado para este filtro.")
 
 
-# --- GRÁFICOS DE PAGAMENTOS E DESCONTOS (Inalterado) ---
+# --- GRÁFICOS DE PAGAMENTOS/DESCONTOS ---
 st.markdown('---')
-st.subheader('Análise Gráfica por Movimentação (Pagamento/Desconto)')
+st.subheader('Análise Gráfica de Movimentações (Pagamentos e Descontos)')
 
-# Agrupamento de Pagamentos (Positivos)
-ranking_pagamentos = df_banco_horas_filtrado[df_banco_horas_filtrado['Pagamentos_Horas'] > 0] \
-    .groupby('Estabelecimento')['Pagamentos_Horas'].sum().sort_values(ascending=False).reset_index()
+# Pagamentos (Crédito)
+df_chart_pagamentos = df_banco_horas_filtrado[df_banco_horas_filtrado['Pagamentos_Horas'] > 0].groupby(
+    'Estabelecimento')['Pagamentos_Horas'].sum().reset_index(name='Total Pagamentos')
+df_chart_pagamentos = df_chart_pagamentos.sort_values(
+    'Total Pagamentos', ascending=True)
 
-# Agrupamento de Descontos (Negativos)
-ranking_descontos_raw = df_banco_horas_filtrado[df_banco_horas_filtrado['Descontos_Horas'] < 0] \
-    .groupby('Estabelecimento')['Descontos_Horas'].sum().sort_values(ascending=True).reset_index()
+df_chart_pagamentos['Total Pagamentos (HH:MM)'] = df_chart_pagamentos['Total Pagamentos'].apply(
+    format_decimal_to_hhmm)
 
-col_ranking_pag, col_ranking_desc = st.columns(2)
+col_chart_pag, col_chart_desc = st.columns(2)
 
-with col_ranking_pag:
-    st.markdown('##### Ranking de Horas Pagas')
-    if not ranking_pagamentos.empty:
-        fig_pag = px.bar(
-            ranking_pagamentos,
-            x='Pagamentos_Horas',
+with col_chart_pag:
+    st.markdown('#### Pagamentos de Horas por Estabelecimento')
+    if not df_chart_pagamentos.empty:
+        fig_pagamentos = px.bar(
+            df_chart_pagamentos,
             y='Estabelecimento',
+            x='Total Pagamentos',
             orientation='h',
-            title='Total de Horas Pagas no Escopo Selecionado',
-            labels={'Pagamentos_Horas': 'Total de Horas (Pagamentos)'},
-            color_discrete_sequence=[COR_PRINCIPAL_VERDE],
-            category_orders={
-                'Estabelecimento': ranking_pagamentos['Estabelecimento'].tolist()},
-            height=CHART_HEIGHT
+            text='Total Pagamentos (HH:MM)',
+            color='Total Pagamentos',
+            color_continuous_scale=px.colors.sequential.Greens,
+            labels={'Total Pagamentos': 'Total de Horas Pagas'},
+            template='plotly_white',
+            height=CHART_HEIGHT,
         )
-        fig_pag.update_traces(texttemplate='%{x:.2f}h', textposition='outside')
-        st.plotly_chart(fig_pag, use_container_width=True)
+        fig_pagamentos.update_traces(textposition='outside', cliponaxis=False)
+        fig_pagamentos.update_layout(xaxis_title=None, showlegend=False)
+        st.plotly_chart(fig_pagamentos, use_container_width=True)
     else:
-        st.info("Nenhum pagamento de horas encontrado para o filtro selecionado.")
+        st.info("Nenhum pagamento de horas encontrado para este filtro.")
 
-with col_ranking_desc:
-    st.markdown('##### Ranking de Horas Descontadas')
-    if not ranking_descontos_raw.empty:
-        fig_desc = px.bar(
-            ranking_descontos_raw,
-            x='Descontos_Horas',
+# Descontos (Débito)
+df_chart_descontos = df_banco_horas_filtrado[df_banco_horas_filtrado['Descontos_Horas'] < 0].groupby(
+    'Estabelecimento')['Descontos_Horas'].sum().reset_index(name='Total Descontos')
+df_chart_descontos = df_chart_descontos.sort_values(
+    'Total Descontos', ascending=False)
+
+df_chart_descontos['Total Descontos (HH:MM)'] = df_chart_descontos['Total Descontos'].apply(
+    format_decimal_to_hhmm)
+
+with col_chart_desc:
+    st.markdown('#### Descontos de Horas por Estabelecimento')
+    if not df_chart_descontos.empty:
+        fig_descontos = px.bar(
+            df_chart_descontos,
             y='Estabelecimento',
+            x='Total Descontos',
             orientation='h',
-            title='Total de Horas Descontadas no Escopo Selecionado',
-            labels={'Descontos_Horas': 'Total de Horas (Descontos)'},
-            color_discrete_sequence=[COR_CONTRASTE],
-            category_orders={
-                'Estabelecimento': ranking_descontos_raw['Estabelecimento'].tolist()},
-            height=CHART_HEIGHT
+            text='Total Descontos (HH:MM)',
+            color='Total Descontos',
+            color_continuous_scale=px.colors.sequential.Reds_r,
+            labels={'Total Descontos': 'Total de Horas Descontadas'},
+            template='plotly_white',
+            height=CHART_HEIGHT,
         )
-        fig_desc.update_traces(
-            texttemplate='%{x:.2f}h', textposition='outside')
-        st.plotly_chart(fig_desc, use_container_width=True)
+        fig_descontos.update_traces(textposition='outside', cliponaxis=False)
+        fig_descontos.update_layout(xaxis_title=None, showlegend=False)
+        st.plotly_chart(fig_descontos, use_container_width=True)
     else:
-        st.info("Nenhum desconto de horas encontrado para o filtro selecionado.")
+        st.info("Nenhum desconto de horas encontrado para este filtro.")
 
-# --- DETALHAMENTO DO BANCO DE HORAS (AJUSTADO COM ESTABELECIMENTO E CARGO) ---
 
-if filtros_ativos:
-    st.markdown('---')
+# --- DETALHE DO BANCO DE HORAS (TABELA) ---
+st.markdown('---')
+st.subheader('Detalhamento por Colaborador')
 
-    estabs_title = ", ".join(
-        selected_establishments) if selected_establishments else "Todos"
-    deps_title = ", ".join(
-        selected_departments) if selected_departments else "Todos"
-    st.subheader(
-        f'Detalhes do Banco de Horas e Movimentações para: **{estabs_title}** / **{deps_title}**')
+# 1. Tabela de Saldo Positivo (Crédito)
+detalhes_positivo_df = df_banco_horas_filtrado[df_banco_horas_filtrado['SaldoFinal_Horas'] > 0].copy()
+detalhes_positivo_df = detalhes_positivo_df.sort_values(
+    'SaldoFinal_Horas', ascending=False)
+detalhes_positivo_df = detalhes_positivo_df[[
+    'Matricula', 'Nome', 'Departamento', 'Saldo Final (HH:MM)'
+]]
+detalhes_positivo_df.columns = [
+    'Matrícula', 'Nome do Funcionário', 'Departamento', 'Saldo Positivo'
+]
 
-    # DEFINIÇÃO DAS COLUNAS COM ESTABELECIMENTO E CARGO
-    BASE_COLUMNS_SALDO = ['Estabelecimento', 'Nome',
-                          'Cargo', 'SaldoFinal_Horas', 'Saldo Final (HH:MM)']
-    BASE_COLUMNS_PAG_DESC = ['Estabelecimento',
-                             'Nome', 'Cargo', 'Horas_Decimais', 'Horas_HHMM']
 
-    # 1. Detalhes de Saldo Positivo
-    detalhes_positivo_df = df_banco_horas_filtrado[df_banco_horas_filtrado['SaldoFinal_Horas'] > 0][
-        BASE_COLUMNS_SALDO
-    ].copy()
-    detalhes_positivo_df.columns = [
-        'Estabelecimento', 'Nome do Funcionário', 'Cargo', 'Saldo (Horas Decimais)', 'Saldo (HH:MM)']
-    detalhes_positivo_df = detalhes_positivo_df.sort_values(
-        by='Saldo (Horas Decimais)', ascending=False).reset_index(drop=True)
+# 2. Tabela de Saldo Negativo (Débito)
+detalhes_negativo_df = df_banco_horas_filtrado[df_banco_horas_filtrado['SaldoFinal_Horas'] < 0].copy()
+detalhes_negativo_df = detalhes_negativo_df.sort_values(
+    'SaldoFinal_Horas', ascending=True)
+detalhes_negativo_df = detalhes_negativo_df[[
+    'Matricula', 'Nome', 'Departamento', 'Saldo Final (HH:MM)'
+]]
+detalhes_negativo_df.columns = [
+    'Matrícula', 'Nome do Funcionário', 'Departamento', 'Saldo Negativo'
+]
 
-    # 2. Detalhes de Saldo Negativo
-    detalhes_negativo_df = df_banco_horas_filtrado[df_banco_horas_filtrado['SaldoFinal_Horas'] < 0][
-        BASE_COLUMNS_SALDO
-    ].copy()
-    detalhes_negativo_df.columns = [
-        'Estabelecimento', 'Nome do Funcionário', 'Cargo', 'Saldo (Horas Decimais)', 'Saldo (HH:MM)']
-    detalhes_negativo_df = detalhes_negativo_df.sort_values(
-        by='Saldo (Horas Decimais)', ascending=True).reset_index(drop=True)
+# 3. Tabela de Pagamentos
+detalhes_pagamentos_df = df_banco_horas_filtrado[df_banco_horas_filtrado['Pagamentos_Horas'] > 0].copy()
+detalhes_pagamentos_df = detalhes_pagamentos_df.sort_values(
+    'Pagamentos_Horas', ascending=False)
+detalhes_pagamentos_df = detalhes_pagamentos_df[[
+    'Matricula', 'Nome', 'Departamento', 'Pagamentos (HH:MM)'
+]]
+detalhes_pagamentos_df.columns = [
+    'Matrícula', 'Nome do Funcionário', 'Departamento', 'Pagamentos'
+]
 
-    # 3. Detalhes de Pagamentos
-    # Mapeando Pagamentos para a estrutura de Pag/Desc
-    detalhes_pagamentos_df_temp = df_banco_horas_filtrado[df_banco_horas_filtrado['Pagamentos_Horas'] > 0].copy(
-    )
-    detalhes_pagamentos_df_temp = detalhes_pagamentos_df_temp.rename(
-        columns={'Pagamentos_Horas': 'Horas_Decimais', 'Pagamentos (HH:MM)': 'Horas_HHMM'})
+# 4. Tabela de Descontos
+detalhes_descontos_df = df_banco_horas_filtrado[df_banco_horas_filtrado['Descontos_Horas'] < 0].copy()
+detalhes_descontos_df = detalhes_descontos_df.sort_values(
+    'Descontos_Horas', ascending=True)
+detalhes_descontos_df = detalhes_descontos_df[[
+    'Matricula', 'Nome', 'Departamento', 'Descontos (HH:MM)'
+]]
+detalhes_descontos_df.columns = [
+    'Matrícula', 'Nome do Funcionário', 'Departamento', 'Descontos'
+]
 
-    detalhes_pagamentos_df = detalhes_pagamentos_df_temp[BASE_COLUMNS_PAG_DESC].copy(
-    )
-    detalhes_pagamentos_df.columns = ['Estabelecimento', 'Nome do Funcionário',
-                                      'Cargo', 'Pagamentos (Horas Decimais)', 'Pagamentos (HH:MM)']
-    detalhes_pagamentos_df = detalhes_pagamentos_df.sort_values(
-        by='Pagamentos (Horas Decimais)', ascending=False).reset_index(drop=True)
 
-    # 4. Detalhes de Descontos
-    # Mapeando Descontos para a estrutura de Pag/Desc
-    detalhes_descontos_df_temp = df_banco_horas_filtrado[df_banco_horas_filtrado['Descontos_Horas'] < 0].copy(
-    )
-    detalhes_descontos_df_temp = detalhes_descontos_df_temp.rename(
-        columns={'Descontos_Horas': 'Horas_Decimais', 'Descontos (HH:MM)': 'Horas_HHMM'})
+# Exibição das Tabelas de Saldo
+st.markdown('#### Saldo Final (Crédito vs. Débito)')
+detalhe_col1, detalhe_col2 = st.columns(2)
 
-    detalhes_descontos_df = detalhes_descontos_df_temp[BASE_COLUMNS_PAG_DESC].copy(
-    )
-    detalhes_descontos_df.columns = ['Estabelecimento', 'Nome do Funcionário',
-                                     'Cargo', 'Descontos (Horas Decimais)', 'Descontos (HH:MM)']
-    detalhes_descontos_df = detalhes_descontos_df.sort_values(
-        by='Descontos (Horas Decimais)', ascending=True).reset_index(drop=True)
+# Saldo Positivo
+with detalhe_col1:
+    st.subheader("Saldo Positivo Detalhado")
+    if not detalhes_positivo_df.empty:
+        num_rows = len(detalhes_positivo_df)
+        dynamic_height = min(num_rows * 35 + 40, 500)
+        st.dataframe(
+            detalhes_positivo_df,
+            use_container_width=True,
+            hide_index=True,
+            height=dynamic_height
+        )
+    else:
+        st.info("Nenhum saldo positivo encontrado para este filtro.")
 
-    # --- EXIBIÇÃO EM 2 LINHAS DE 2 COLUNAS CADA ---
+# Saldo Negativo
+with detalhe_col2:
+    st.subheader("Saldo Negativo Detalhado")
+    if not detalhes_negativo_df.empty:
+        num_rows = len(detalhes_negativo_df)
+        dynamic_height = min(num_rows * 35 + 40, 500)
+        st.dataframe(
+            detalhes_negativo_df,
+            use_container_width=True,
+            hide_index=True,
+            height=dynamic_height
+        )
+    else:
+        st.info("Nenhum saldo negativo encontrado para este filtro.")
 
-    st.markdown('#### Resumo de Saldo Final')
-    detalhe_banco_col1, detalhe_banco_col2 = st.columns(2)
+st.markdown('---')
+st.markdown('#### Movimentações (Pagamentos e Descontos)')
+detalhe_mov_col1, detalhe_mov_col2 = st.columns(2)
 
-    # Saldo Positivo
-    with detalhe_banco_col1:
-        st.subheader("Saldo Positivo Detalhado")
-        if not detalhes_positivo_df.empty:
-            num_rows = len(detalhes_positivo_df)
-            dynamic_height = min(num_rows * 35 + 40, 500)
-            st.dataframe(
-                detalhes_positivo_df,
-                use_container_width=True,
-                hide_index=True,
-                height=dynamic_height
-            )
-        else:
-            st.info("Nenhum saldo positivo encontrado para este filtro.")
+# Pagamentos
+with detalhe_mov_col1:
+    st.subheader("Pagamentos de Horas Detalhados")
+    if not detalhes_pagamentos_df.empty:
+        num_rows = len(detalhes_pagamentos_df)
+        dynamic_height = min(num_rows * 35 + 40, 500)
+        st.dataframe(
+            detalhes_pagamentos_df,
+            use_container_width=True,
+            hide_index=True,
+            height=dynamic_height
+        )
+    else:
+        st.info("Nenhum pagamento de horas encontrado para este filtro.")
 
-    # Saldo Negativo
-    with detalhe_banco_col2:
-        st.subheader("Saldo Negativo Detalhado")
-        if not detalhes_negativo_df.empty:
-            num_rows = len(detalhes_negativo_df)
-            dynamic_height = min(num_rows * 35 + 40, 500)
-            st.dataframe(
-                detalhes_negativo_df,
-                use_container_width=True,
-                hide_index=True,
-                height=dynamic_height
-            )
-        else:
-            st.info("Nenhum saldo negativo encontrado para este filtro.")
+# Descontos
+with detalhe_mov_col2:
+    st.subheader("Descontos de Horas Detalhados")
+    if not detalhes_descontos_df.empty:
+        num_rows = len(detalhes_descontos_df)
+        dynamic_height = min(num_rows * 35 + 40, 500)
+        st.dataframe(
+            detalhes_descontos_df,
+            use_container_width=True,
+            hide_index=True,
+            height=dynamic_height
+        )
+    else:
+        st.info("Nenhum desconto de horas encontrado para este filtro.")
 
-    st.markdown('---')
-    st.markdown('#### Movimentações (Pagamentos e Descontos)')
-    detalhe_mov_col1, detalhe_mov_col2 = st.columns(2)
-
-    # Pagamentos
-    with detalhe_mov_col1:
-        st.subheader("Pagamentos de Horas Detalhados")
-        if not detalhes_pagamentos_df.empty:
-            num_rows = len(detalhes_pagamentos_df)
-            dynamic_height = min(num_rows * 35 + 40, 500)
-            st.dataframe(
-                detalhes_pagamentos_df,
-                use_container_width=True,
-                hide_index=True,
-                height=dynamic_height
-            )
-        else:
-            st.info("Nenhum pagamento de horas encontrado para este filtro.")
-
-    # Descontos
-    with detalhe_mov_col2:
-        st.subheader("Descontos de Horas Detalhados")
-        if not detalhes_descontos_df.empty:
-            num_rows = len(detalhes_descontos_df)
-            dynamic_height = min(num_rows * 35 + 40, 500)
-            st.dataframe(
-                detalhes_descontos_df,
-                use_container_width=True,
-                hide_index=True,
-                height=dynamic_height
-            )
-        else:
-            st.info("Nenhum desconto de horas encontrado para este filtro.")
