@@ -1,11 +1,11 @@
-# pages/1_Ocorrências_Detalhadas.py (AJUSTADO PARA GITHUB)
+# pages/1_Ocorrências_Detalhadas.py (AJUSTADO PARA GITHUB e XLSX)
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import numpy as np
-import requests             # NOVO: Necessário para buscar URLs do GitHub
-from io import StringIO     # NOVO: Necessário para ler o conteúdo da resposta HTTP como um arquivo CSV
+import requests             # Necessário para buscar URLs do GitHub
+import io                   # NOVO: Necessário para lidar com dados binários do Excel (BytesIO)
 
 # --- Constantes e Configurações ---
 st.set_page_config(
@@ -13,23 +13,28 @@ st.set_page_config(
 COR_PRINCIPAL_VERDE = "#70C247"
 COR_CONTRASTE = "#4CAF50" # Cor usada para contrastes (Marcações Ímpares)
 
-# --- URLs BRUTAS DO GITHUB (AJUSTE CRÍTICO) ---
+# --- URLs BRUTAS DO GITHUB (AJUSTE CRÍTICO PARA XLSX) ---
 REPO_URL_BASE = 'https://raw.githubusercontent.com/oliveirafabio8813-design/meu-dashboard-profarma/main/Dashboard/'
-URL_OCORRENCIAS = REPO_URL_BASE + 'Relatorio_OcorrenciasNoPonto.xlsx%20-%20Ocorr%C3%AAnciasnoPonto.csv'
-URL_BANCO_HORAS_RESUMO = REPO_URL_BASE + 'Relatorio_ContaCorrenteBancoDeHorasResumo.xlsx%20-%20ContaCorrenteBancodeHorasResum.csv' # Mantido para carregar Estabelecimento/Departamento
 
+# Arquivos XLSX e suas abas
+URL_OCORRENCIAS = REPO_URL_BASE + 'Relatorio_OcorrenciasNoPonto.xlsx'
+SHEET_OCORRENCIAS = 'OcorrênciasnoPonto' # Nome da aba no Excel
+
+URL_BANCO_HORAS_RESUMO = REPO_URL_BASE + 'Relatorio_ContaCorrenteBancoDeHorasResumo.xlsx' # Mantido para carregar Estabelecimento/Departamento
+SHEET_BANCO_HORAS = 'ContaCorrenteBancodeHorasResum'
 
 # --- Funções de Processamento de Dados ---
 
 @st.cache_data(show_spinner="Carregando dados do GitHub...")
-def load_data_from_github(url):
-    """Carrega o arquivo CSV do link Raw do GitHub."""
+def load_data_from_github(url, sheet_name):
+    """Carrega o arquivo Excel (XLSX) do link Raw do GitHub."""
     try:
         response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        return pd.read_csv(StringIO(response.text), sep=',')
+        response.raise_for_status() # Lança erro para códigos HTTP 4xx/5xx
+        # Lê o conteúdo binário da resposta e usa pd.read_excel
+        return pd.read_excel(io.BytesIO(response.content), sheet_name=sheet_name)
     except Exception as e:
-        st.error(f"⚠️ Erro ao carregar dados do GitHub ({url}): {e}")
+        st.error(f"⚠️ Erro ao carregar dados do GitHub ({url}, Aba: {sheet_name}): {e}")
         return pd.DataFrame()
 
 
@@ -57,8 +62,9 @@ def convert_to_hours(time_str):
 
 @st.cache_data
 def load_data():
-    df_ocorrencias = load_data_from_github(URL_OCORRENCIAS)
-    df_banco_horas = load_data_from_github(URL_BANCO_HORAS_RESUMO)
+    # CHAMA A FUNÇÃO CORRIGIDA PARA XLSX
+    df_ocorrencias = load_data_from_github(URL_OCORRENCIAS, SHEET_OCORRENCIAS)
+    df_banco_horas = load_data_from_github(URL_BANCO_HORAS_RESUMO, SHEET_BANCO_HORAS)
     
     if df_ocorrencias.empty:
         st.error("Falha ao carregar o DataFrame de Ocorrências do GitHub.")
@@ -187,6 +193,10 @@ st.markdown('---')
 st.subheader('Resumo das Ocorrências (Filtros Aplicados)')
 
 # Cálculos de KPIs
+df_ocorrencias_filtrado['is_falta_nao_justificada'] = df_ocorrencias_filtrado.apply(
+    lambda row: 1 if row['Ocorrencia'] == 'Falta' and row['Justificativa'] == 'Falta' else 0,
+    axis=1
+)
 total_faltas_filtrado = df_ocorrencias_filtrado['is_falta_nao_justificada'].sum()
 total_impares_filtrado = df_ocorrencias_filtrado['is_impar'].sum()
 total_sem_marcacao_filtrado = df_ocorrencias_filtrado['is_sem_marcacao'].sum()
