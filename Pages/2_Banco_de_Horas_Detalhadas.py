@@ -351,9 +351,11 @@ st.subheader('Detalhamento por Colaborador')
 detalhes_positivo_df = df_banco_horas_filtrado[df_banco_horas_filtrado['SaldoFinal_Horas'] > 0].copy()
 detalhes_positivo_df = detalhes_positivo_df.sort_values(
     'SaldoFinal_Horas', ascending=False)
+# Seleção da Coluna: 'Departamento' antes de 'Cargo'
 detalhes_positivo_df = detalhes_positivo_df[[
     'Matricula', 'Nome', 'Departamento', 'Cargo', 'Saldo Final (HH:MM)' 
 ]]
+# Renomeando as Colunas: 'Departamento' antes de 'Cargo'
 detalhes_positivo_df.columns = [
     'Matrícula', 'Nome do Funcionário', 'Departamento', 'Cargo', 'Saldo Positivo'
 ]
@@ -363,9 +365,11 @@ detalhes_positivo_df.columns = [
 detalhes_negativo_df = df_banco_horas_filtrado[df_banco_horas_filtrado['SaldoFinal_Horas'] < 0].copy()
 detalhes_negativo_df = detalhes_negativo_df.sort_values(
     'SaldoFinal_Horas', ascending=True)
+# Seleção da Coluna: 'Departamento' antes de 'Cargo'
 detalhes_negativo_df = detalhes_negativo_df[[
     'Matricula', 'Nome', 'Departamento', 'Cargo', 'Saldo Final (HH:MM)'
 ]]
+# Renomeando as Colunas: 'Departamento' antes de 'Cargo'
 detalhes_negativo_df.columns = [
     'Matrícula', 'Nome do Funcionário', 'Departamento', 'Cargo', 'Saldo Negativo'
 ]
@@ -374,9 +378,11 @@ detalhes_negativo_df.columns = [
 detalhes_pagamentos_df = df_banco_horas_filtrado[df_banco_horas_filtrado['Pagamentos_Horas'] > 0].copy()
 detalhes_pagamentos_df = detalhes_pagamentos_df.sort_values(
     'Pagamentos_Horas', ascending=False)
+# Seleção da Coluna: 'Departamento' antes de 'Cargo'
 detalhes_pagamentos_df = detalhes_pagamentos_df[[
     'Matricula', 'Nome', 'Departamento', 'Cargo', 'Pagamentos (HH:MM)'
 ]]
+# Renomeando as Colunas: 'Departamento' antes de 'Cargo'
 detalhes_pagamentos_df.columns = [
     'Matrícula', 'Nome do Funcionário', 'Departamento', 'Cargo', 'Pagamentos'
 ]
@@ -385,9 +391,11 @@ detalhes_pagamentos_df.columns = [
 detalhes_descontos_df = df_banco_horas_filtrado[df_banco_horas_filtrado['Descontos_Horas'] < 0].copy()
 detalhes_descontos_df = detalhes_descontos_df.sort_values(
     'Descontos_Horas', ascending=True)
+# Seleção da Coluna: 'Departamento' antes de 'Cargo'
 detalhes_descontos_df = detalhes_descontos_df[[
     'Matricula', 'Nome', 'Departamento', 'Cargo', 'Descontos (HH:MM)'
 ]]
+# Renomeando as Colunas: 'Departamento' antes de 'Cargo'
 detalhes_descontos_df.columns = [
     'Matrícula', 'Nome do Funcionário', 'Departamento', 'Cargo', 'Descontos'
 ]
@@ -460,6 +468,7 @@ with detalhe_mov_col2:
         )
     else:
         st.info("Nenhum desconto de horas encontrado para este filtro.")
+
 
 
 
