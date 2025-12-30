@@ -4,123 +4,94 @@ import plotly.express as px
 import requests
 import io
 
-# --- Configurações Iniciais ---
-st.set_page_config(layout="wide", page_title="Dashboard Profarma - Ocorrências")
-COR_FALTA = "#E74C3C" 
-COR_MARCACAO = "#3498DB"
+st.set_page_config(layout="wide", page_title="Dashboard Profarma")
 
-# URLs do GitHub
-REPO_URL_BASE = 'https://raw.githubusercontent.com/oliveirafabio8813-design/meu-dashboard-profarma/main/Dashboard/'
-URL_OCORRENCIAS = REPO_URL_BASE + 'Relatorio_OcorrenciasNoPonto.xlsx'
-SHEET_NAME = 'OcorrênciasnoPonto'
+# --- CONFIGURAÇÃO DE ACESSO ---
+# Verifique se este link abre o download automático do arquivo no seu navegador
+URL_EXCEL = "https://raw.githubusercontent.com/oliveirafabio8813-design/meu-dashboard-profarma/main/Dashboard/Relatorio_OcorrenciasNoPonto.xlsx"
+NOME_ABA_ESPERADO = "OcorrênciasnoPonto" 
 
-@st.cache_data(ttl=60)
-def load_data():
+@st.cache_data(ttl=30)
+def carregar_dados_seguro():
     try:
-        response = requests.get(URL_OCORRENCIAS, timeout=30)
+        response = requests.get(URL_EXCEL, timeout=30)
         response.raise_for_status()
         
-        # Carrega o Excel
-        df = pd.read_excel(io.BytesIO(response.content), sheet_name=SHEET_NAME)
+        # Abrir o arquivo para validar as abas existentes
+        excel_file = pd.ExcelFile(io.BytesIO(response.content))
+        abas_reais = excel_file.sheet_names
         
-        # Limpa nomes das colunas (remove espaços e garante string)
+        # Se a aba esperada não estiver lá, tenta pegar a primeira aba disponível
+        aba_para_usar = NOME_ABA_ESPERADO if NOME_ABA_ESPERADO in abas_reais else abas_reais[0]
+        
+        df = excel_file.parse(aba_para_usar)
+        
+        # Limpeza de colunas
         df.columns = [str(c).strip() for c in df.columns]
         
-        # 1. Tratamento da Data
-        df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
-        
-        # 2. Função de Normalização para comparação segura
-        def normalize(val):
-            return str(val).strip().lower()
-
-        # 3. Lógica de Faltas (Ocorrencia == 'falta' e Justificativa == 'falta')
-        df['is_falta'] = df.apply(
-            lambda x: 1 if (normalize(x.get('Ocorrencia', '')) == 'falta' and 
-                            normalize(x.get('Justificativa', '')) == 'falta') else 0, axis=1
-        )
-        
-        # 4. Lógica de Marcação Ímpar
-        # Verifica se a ocorrência contém "sem marcação" OU se a justificativa é "falta de marcação"
-        df['is_impar'] = df.apply(
-            lambda x: 1 if ('sem marcação' in normalize(x.get('Ocorrencia', '')) or 
-                            normalize(x.get('Justificativa', '')) == 'falta de marcação') else 0, axis=1
-        )
-        
-        return df
+        # Diagnóstico para o usuário (ajuda a debugar se não funcionar)
+        return df, abas_reais, aba_para_usar
     except Exception as e:
-        st.error(f"Erro ao carregar dados: {e}")
-        return pd.DataFrame()
+        st.error(f"Erro ao conectar com o GitHub: {e}")
+        return pd.DataFrame(), [], ""
 
-df_raw = load_data()
+df_raw, lista_abas, aba_detectada = carregar_dados_seguro()
 
-# --- Título e Interface ---
-st.title("📊 Análise Diária: Faltas e Marcações Ímpares")
-st.markdown("---")
+# --- TÍTULO ---
+st.title("📊 Verificação de Ocorrências Diárias")
+
+# Painel de Ajuda (Só aparece se houver erro ou para conferência)
+with st.expander("🔍 Diagnóstico de Conexão (Clique aqui se o gráfico não aparecer)"):
+    st.write(f"**Abas encontradas no arquivo:** {lista_abas}")
+    st.write(f"**Aba sendo lida agora:** {aba_detectada}")
+    if not df_raw.empty:
+        st.write(f"**Colunas detectadas:** {list(df_raw.columns)}")
 
 if not df_raw.empty:
-    # Filtros
-    col_f1, col_f2 = st.columns(2)
-    with col_f1:
-        sel_estab = st.multiselect("Filtrar Estabelecimento:", sorted(df_raw['Estabelecimento'].dropna().unique()))
+    # Processamento de Dados (Normalização Forçada)
+    df_raw['Data'] = pd.to_datetime(df_raw['Data'], errors='coerce')
     
-    df_filtrado = df_raw.copy()
-    if sel_estab:
-        df_filtrado = df_filtrado[df_filtrado['Estabelecimento'].isin(sel_estab)]
+    def check_falta(row):
+        oc = str(row.get('Ocorrencia', '')).strip().lower()
+        ju = str(row.get('Justificativa', '')).strip().lower()
+        return 1 if (oc == 'falta' and ju == 'falta') else 0
 
-    with col_f2:
-        sel_dep = st.multiselect("Filtrar Departamento:", sorted(df_filtrado['Departamento'].dropna().unique()))
-    
-    if sel_dep:
-        df_filtrado = df_filtrado[df_filtrado['Departamento'].isin(sel_dep)]
+    def check_impar(row):
+        oc = str(row.get('Ocorrencia', '')).strip().lower()
+        ju = str(row.get('Justificativa', '')).strip().lower()
+        # Busca por termos parciais para ser mais flexível
+        if 'sem marcação' in oc or ju == 'falta de marcação':
+            return 1
+        return 0
 
-    # --- Processamento para o Gráfico ---
-    # Remove datas nulas e agrupa
-    df_diario = df_filtrado.dropna(subset=['Data']).groupby('Data').agg(
-        Total_Faltas=('is_falta', 'sum'),
-        Marcacoes_Impares=('is_impar', 'sum')
+    df_raw['is_falta'] = df_raw.apply(check_falta, axis=1)
+    df_raw['is_impar'] = df_raw.apply(check_impar, axis=1)
+
+    # Gráfico Diário
+    df_grafico = df_raw.dropna(subset=['Data']).groupby('Data').agg(
+        Faltas=('is_falta', 'sum'),
+        Impares=('is_impar', 'sum')
     ).reset_index()
 
-    # Ordenação Cronológica
-    df_diario = df_diario.sort_values('Data')
-    df_diario['Data_Str'] = df_diario['Data'].dt.strftime('%d/%m/%Y')
+    if not df_grafico.empty and (df_grafico['Faltas'].sum() + df_grafico['Impares'].sum() > 0):
+        df_grafico = df_grafico.sort_values('Data')
+        df_grafico['Dia'] = df_grafico['Data'].dt.strftime('%d/%m/%Y')
 
-    # --- Gráfico de Barras Verticais ---
-    st.subheader("Comparativo por Data")
-    
-    # Verifica se há algo para mostrar
-    if not df_diario.empty and (df_diario['Total_Faltas'].sum() + df_diario['Marcacoes_Impares'].sum() > 0):
         fig = px.bar(
-            df_diario,
-            x='Data_Str',
-            y=['Total_Faltas', 'Marcacoes_Impares'],
+            df_grafico, x='Dia', y=['Faltas', 'Impares'],
             barmode='group',
-            labels={'value': 'Quantidade', 'Data_Str': 'Data', 'variable': 'Tipo de Ocorrência'},
-            color_discrete_map={'Total_Faltas': COR_FALTA, 'Marcacoes_Impares': COR_MARCACAO},
-            template='plotly_white',
-            text_auto=True
+            text_auto=True,
+            title="Comparativo: Faltas vs Marcações Ímpares",
+            color_discrete_map={'Faltas': '#E74C3C', 'Impares': '#3498DB'},
+            template='plotly_white'
         )
-        
-        fig.update_layout(
-            xaxis_title="Dias",
-            yaxis_title="Total de Ocorrências",
-            legend_title="Legenda",
-            xaxis={'type': 'category'}, # Garante que as datas fiquem em ordem
-            height=500
-        )
-        
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("Nenhuma ocorrência encontrada para os critérios selecionados nos filtros.")
+        st.warning("⚠️ O arquivo foi lido, mas nenhuma linha atende aos critérios: (Ocorrência=Falta + Justificativa=Falta) ou (Sem Marcação).")
+        st.info("Dica: Verifique na tabela abaixo se os nomes das colunas e os textos estão escritos como o esperado.")
 
-    # --- Tabela de Conferência (Abaixo do Gráfico) ---
+    # Tabela de Conferência
     st.markdown("---")
-    with st.expander("Clique para ver os dados detalhados da seleção"):
-        st.dataframe(
-            df_filtrado[df_filtrado['is_falta'] + df_filtrado['is_impar'] > 0][
-                ['Matricula', 'Nome', 'Data', 'Ocorrencia', 'Justificativa']
-            ].sort_values('Data'),
-            use_container_width=True,
-            hide_index=True
-        )
-else:
-    st.error("O arquivo não pôde ser carregado. Verifique se o link no GitHub ainda é válido.")
+    st.subheader("Amostra dos Dados")
+    st.dataframe(df_raw[['Estabelecimento', 'Data', 'Ocorrencia', 'Justificativa']].head(20))
+
