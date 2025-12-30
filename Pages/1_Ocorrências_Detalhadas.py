@@ -1,4 +1,4 @@
-# pages/1_Ocorrências_Detalhadas.py (ATUALIZADO)
+# pages/1_Ocorrências_Detalhadas.py
 
 import streamlit as st
 import pandas as pd
@@ -10,7 +10,7 @@ import io
 # --- Constantes e Configurações ---
 st.set_page_config(layout="wide", page_title="Dashboard Profarma - Ocorrências")
 COR_PRINCIPAL_VERDE = "#70C247"
-COR_CONTRASTE = "#4CAF50" # Cor usada para contrastes (Marcações Ímpares)
+COR_CONTRASTE = "#4CAF50" 
 
 # --- URLs BRUTAS DO GITHUB ---
 REPO_URL_BASE = 'https://raw.githubusercontent.com/oliveirafabio8813-design/meu-dashboard-profarma/main/Dashboard/'
@@ -34,22 +34,8 @@ def load_data_from_github(url, sheet_name):
 def e_marcacoes_impar(marcacoes):
     if pd.isna(marcacoes):
         return False
+    # Divide as marcações por espaços e conta se é ímpar
     return len(str(marcacoes).strip().split()) % 2 != 0
-
-def convert_to_hours(time_str):
-    if pd.isna(time_str) or time_str == '00:00':
-        return 0.0
-    try:
-        is_negative = str(time_str).startswith('-')
-        if is_negative:
-            time_str = str(time_str)[1:]
-        parts = str(time_str).split(':')
-        hours = int(parts[0])
-        minutes = int(parts[1])
-        total_hours = hours + minutes / 60
-        return -total_hours if is_negative else total_hours
-    except (ValueError, IndexError):
-        return 0.0
 
 @st.cache_data
 def load_data():
@@ -61,9 +47,15 @@ def load_data():
         st.stop()
         
     try:
-        df_ocorrencias['Data'] = pd.to_datetime(df_ocorrencias['Data'], errors='coerce', dayfirst=True)
+        # AJUSTE NA DATA: O arquivo usa formato ISO (YYYY-MM-DD)
+        df_ocorrencias['Data'] = pd.to_datetime(df_ocorrencias['Data'], errors='coerce')
+        
+        # Identificação de ocorrências
         df_ocorrencias['is_impar'] = df_ocorrencias['Marcacoes'].apply(e_marcacoes_impar)
         df_ocorrencias['is_sem_marcacao'] = df_ocorrencias['Ocorrencia'].isin(['Sem marcação de entrada', 'Sem marcação de saída'])
+        df_ocorrencias['is_falta_nao_justificada'] = df_ocorrencias.apply(
+            lambda row: 1 if row['Ocorrencia'] == 'Falta' and row['Justificativa'] == 'Falta' else 0, axis=1
+        )
     except Exception as e:
         st.error(f"Erro ao processar dados: {e}")
         st.stop()
@@ -72,7 +64,7 @@ def load_data():
 
 df_ocorrencias, df_banco_horas = load_data()
 
-# --- TÍTULO DA PÁGINA ---
+# --- TÍTULO ---
 col_logo, col_title, _ = st.columns([1, 4, 1])
 with col_logo:
     try:
@@ -95,51 +87,43 @@ if 'selected_establishment_ocorrencias' not in st.session_state:
 if 'selected_department_ocorrencias' not in st.session_state:
     st.session_state['selected_department_ocorrencias'] = []
 
-def reset_filters():
-    st.session_state['selected_establishment_ocorrencias'] = []
-    st.session_state['selected_department_ocorrencias'] = []
-
 with col_filter_button:
     st.write("") ; st.write("")
-    st.button('Limpar Filtros', on_click=reset_filters, use_container_width=True)
+    if st.button('Limpar Filtros', use_container_width=True):
+        st.session_state['selected_establishment_ocorrencias'] = []
+        st.session_state['selected_department_ocorrencias'] = []
+        st.rerun()
 
 with col_filter_est:
-    todos_estabelecimentos = sorted(list(df_ocorrencias['Estabelecimento'].unique()))
-    selected_establishments = st.multiselect('Estabelecimento:', options=todos_estabelecimentos, key='selected_establishment_ocorrencias')
+    selected_establishments = st.multiselect('Estabelecimento:', 
+                                             options=sorted(df_ocorrencias['Estabelecimento'].unique()), 
+                                             key='selected_establishment_ocorrencias')
 
+df_filtrado = df_ocorrencias.copy()
 if selected_establishments:
-    df_ocorrencias_filtrado = df_ocorrencias[df_ocorrencias['Estabelecimento'].isin(selected_establishments)].copy()
-else:
-    df_ocorrencias_filtrado = df_ocorrencias.copy()
+    df_filtrado = df_filtrado[df_filtrado['Estabelecimento'].isin(selected_establishments)]
 
 with col_filter_dep:
-    todos_departamentos = sorted(list(df_ocorrencias_filtrado['Departamento'].unique()))
-    selected_departments = st.multiselect('Departamento:', options=todos_departamentos, key='selected_department_ocorrencias')
+    selected_departments = st.multiselect('Departamento:', 
+                                          options=sorted(df_filtrado['Departamento'].unique()), 
+                                          key='selected_department_ocorrencias')
 
 if selected_departments:
-    df_ocorrencias_filtrado = df_ocorrencias_filtrado[df_ocorrencias_filtrado['Departamento'].isin(selected_departments)].copy()
+    df_filtrado = df_filtrado[df_filtrado['Departamento'].isin(selected_departments)]
 
 # --- KPIs ---
 st.markdown('---')
-st.subheader('Resumo das Ocorrências')
+c1, c2 = st.columns(2)
+total_faltas = df_filtrado['is_falta_nao_justificada'].sum()
+total_impares = df_filtrado['is_impar'].sum() + df_filtrado['is_sem_marcacao'].sum()
 
-df_ocorrencias_filtrado['is_falta_nao_justificada'] = df_ocorrencias_filtrado.apply(
-    lambda row: 1 if row['Ocorrencia'] == 'Falta' and row['Justificativa'] == 'Falta' else 0, axis=1)
-
-total_faltas = df_ocorrencias_filtrado['is_falta_nao_justificada'].sum()
-total_impares = df_ocorrencias_filtrado['is_impar'].sum()
-total_sem_marcacao = df_ocorrencias_filtrado['is_sem_marcacao'].sum()
-total_geral_impares = int(total_impares + total_sem_marcacao)
-
-c1, c2, c3 = st.columns(3)
 c1.metric("Faltas Não Justificadas", int(total_faltas))
-c2.metric("Marcações Ímpares/Ausentes", total_geral_impares)
+c2.metric("Marcações Ímpares/Ausentes", int(total_impares))
 
 # --- GRÁFICO 1: POR DEPARTAMENTO ---
 st.markdown('---')
 st.subheader('Ocorrências por Departamento')
-
-df_chart_dep = df_ocorrencias_filtrado.groupby('Departamento').agg(
+df_chart_dep = df_filtrado.groupby('Departamento').agg(
     Faltas=('is_falta_nao_justificada', 'sum'),
     Impares=('is_impar', 'sum'),
     Sem_Marcacao=('is_sem_marcacao', 'sum')
@@ -148,63 +132,58 @@ df_chart_dep['Total'] = df_chart_dep['Faltas'] + df_chart_dep['Impares'] + df_ch
 df_chart_dep = df_chart_dep[df_chart_dep['Total'] > 0].sort_values('Total', ascending=True)
 
 if not df_chart_dep.empty:
-    h_dep = min(len(df_chart_dep) * 40 + 80, 700)
     fig_dep = px.bar(df_chart_dep, y='Departamento', x=['Faltas', 'Impares', 'Sem_Marcacao'],
                      orientation='h', color_discrete_sequence=[COR_CONTRASTE, '#ffc107', '#17a2b8'],
-                     template='plotly_white', height=h_dep)
+                     template='plotly_white', height=min(len(df_chart_dep)*35+100, 600))
     st.plotly_chart(fig_dep, use_container_width=True)
 
-# --- NOVO GRÁFICO 3: POR DATA (ABAIXO DO DE DEP.) ---
+# --- GRÁFICO 3: POR DATA (O QUE VOCÊ PEDIU) ---
 st.markdown('---')
 st.subheader('Ocorrências por Data')
 
-df_chart_data = df_ocorrencias_filtrado.groupby('Data').agg(
+# Garantir que não existam datas nulas antes de agrupar
+df_data = df_filtrado.dropna(subset=['Data']).copy()
+
+df_chart_data = df_data.groupby('Data').agg(
     Faltas=('is_falta_nao_justificada', 'sum'),
     Impares=('is_impar', 'sum'),
     Sem_Marcacao=('is_sem_marcacao', 'sum')
 ).reset_index()
 
-df_chart_data['Data_Formatada'] = df_chart_data['Data'].dt.strftime('%d/%m/%Y')
-df_chart_data['Total_Dia'] = df_chart_data['Faltas'] + df_chart_data['Impares'] + df_chart_data['Sem_Marcacao']
-df_chart_data = df_chart_data[df_chart_data['Total_Dia'] > 0].sort_values('Data', ascending=True)
+# Ordenar por data cronológica
+df_chart_data = df_chart_data.sort_values('Data')
+
+# Criar coluna formatada para o eixo do gráfico
+df_chart_data['Data Exibição'] = df_chart_data['Data'].dt.strftime('%d/%m/%Y')
 
 if not df_chart_data.empty:
-    h_data = min(len(df_chart_data) * 35 + 80, 500)
-    fig_data = px.bar(df_chart_data, y='Data_Formatada', x=['Faltas', 'Impares', 'Sem_Marcacao'],
-                      orientation='h', color_discrete_sequence=[COR_CONTRASTE, '#ffc107', '#17a2b8'],
-                      labels={'value': 'Qtd Ocorrências', 'Data_Formatada': 'Data', 'variable': 'Tipo'},
-                      template='plotly_white', height=h_data)
-    fig_data.update_layout(yaxis={'categoryorder':'total ascending'})
+    fig_data = px.bar(df_chart_data, 
+                      y='Data Exibição', 
+                      x=['Faltas', 'Impares', 'Sem_Marcacao'],
+                      orientation='h',
+                      color_discrete_sequence=[COR_CONTRASTE, '#ffc107', '#17a2b8'],
+                      labels={'value': 'Qtd Ocorrências', 'variable': 'Tipo'},
+                      template='plotly_white', 
+                      height=min(len(df_chart_data)*35+100, 500))
+    
+    # Isso garante que o gráfico siga a ordem das datas e não a ordem alfabética
+    fig_data.update_layout(yaxis={'categoryorder':'trace'})
     st.plotly_chart(fig_data, use_container_width=True)
 else:
-    st.info("Sem dados cronológicos para exibir.")
+    st.info("Nenhuma ocorrência encontrada nas datas deste arquivo.")
 
-# --- TABELAS DETALHADAS ---
+# --- TABELAS ---
 st.markdown('---')
-st.subheader('Detalhamento por Colaborador')
-
-# Preparação das tabelas (Faltas e Ímpares)
-faltas_df = df_ocorrencias_filtrado[df_ocorrencias_filtrado['is_falta_nao_justificada'] == 1].copy()
-if not faltas_df.empty:
-    faltas_df['Data'] = faltas_df['Data'].dt.strftime('%d/%m/%Y')
-    faltas_df = faltas_df[['Matricula', 'Nome', 'Data', 'Departamento']].sort_values(['Nome', 'Data'])
-
-impares_df = df_ocorrencias_filtrado[df_ocorrencias_filtrado['is_impar'] | df_ocorrencias_filtrado['is_sem_marcacao']].copy()
-if not impares_df.empty:
-    impares_df['Data'] = impares_df['Data'].dt.strftime('%d/%m/%Y')
-    impares_df = impares_df[['Matricula', 'Nome', 'Data', 'Departamento', 'Marcacoes']].sort_values(['Nome', 'Data'])
-
-detalhe_col1, detalhe_col2 = st.columns(2)
-with detalhe_col1:
+det_c1, det_c2 = st.columns(2)
+with det_c1:
     st.markdown("**Faltas Detalhadas**")
-    if not faltas_df.empty:
-        st.dataframe(faltas_df, use_container_width=True, hide_index=True, height=400)
-    else:
-        st.info("Nenhuma falta encontrada.")
-
-with detalhe_col2:
+    f_tab = df_filtrado[df_filtrado['is_falta_nao_justificada'] == 1][['Matricula', 'Nome', 'Data', 'Departamento']].copy()
+    if not f_tab.empty:
+        f_tab['Data'] = f_tab['Data'].dt.strftime('%d/%m/%Y')
+        st.dataframe(f_tab, use_container_width=True, hide_index=True)
+with det_c2:
     st.markdown("**Marcações Ímpares Detalhadas**")
-    if not impares_df.empty:
-        st.dataframe(impares_df, use_container_width=True, hide_index=True, height=400)
-    else:
-        st.info("Nenhuma marcação ímpar encontrada.")
+    i_tab = df_filtrado[df_filtrado['is_impar'] | df_filtrado['is_sem_marcacao']][['Matricula', 'Nome', 'Data', 'Departamento', 'Marcacoes']].copy()
+    if not i_tab.empty:
+        i_tab['Data'] = i_tab['Data'].dt.strftime('%d/%m/%Y')
+        st.dataframe(i_tab, use_container_width=True, hide_index=True)
