@@ -1,11 +1,14 @@
+
 # Dashboard_Ocorrencias.py (Página Principal - Resumo Profissional com Head Count Global)
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import numpy as np
-import requests             # Necessário para buscar URLs do GitHub
-import io                   # NOVO: Necessário para lidar com dados binários do Excel (BytesIO)
+import requests
+import io
+import zipfile
+import unicodedata  # >>> normalizar nomes de abas e evitar problemas com acentos/espacos
 
 # --- Constantes e Configurações ---
 st.set_page_config(layout="wide", page_title="Dashboard Profarma - Resumo",
@@ -15,77 +18,142 @@ st.set_page_config(layout="wide", page_title="Dashboard Profarma - Resumo",
 COR_PRINCIPAL_VERDE = "#70C247"
 COR_ALERTA_VERMELHO = "#dc3545"
 
-# --- URLs BRUTAS DO GITHUB (AJUSTE CRÍTICO PARA XLSX) ---
+# --- URLs BRUTAS DO GITHUB (XLSX) ---
 REPO_URL_BASE = 'https://raw.githubusercontent.com/oliveirafabio8813-design/meu-dashboard-profarma/main/Dashboard/'
 
-# Arquivos XLSX (Nomes completos do arquivo no GitHub)
 URL_OCORRENCIAS = REPO_URL_BASE + 'Relatorio_OcorrenciasNoPonto.xlsx'
-SHEET_OCORRENCIAS = 'OcorrênciasnoPonto' # Nome da aba no Excel
-
+SHEET_OCORRENCIAS = 'OcorrênciasnoPonto'  # confere com a sua planilha
 URL_BANCO_HORAS_RESUMO = REPO_URL_BASE + 'Relatorio_ContaCorrenteBancoDeHorasResumo.xlsx'
-SHEET_BANCO_HORAS = 'ContaCorrenteBancodeHorasResum' # Nome da aba no Excel
+SHEET_BANCO_HORAS = 'ContaCorrenteBancodeHorasResum'  # confere com a sua planilha
 
-# --- Funções de Processamento de Dados ---
+# --------------------------------------
+# Utilidades
+# --------------------------------------
+def _normalize(s: str) -> str:
+    """Remove acentos e espaços para facilitar comparações."""
+    if not isinstance(s, str):
+        s = str(s)
+    s = unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode('ascii')
+    return s.replace(" ", "").lower()
 
-@st.cache_data(show_spinner="Carregando dados do GitHub...")
-def load_data_from_github(url, sheet_name):
-    """Carrega o arquivo Excel (XLSX) do link Raw do GitHub."""
+def _is_html(b: bytes) -> bool:
+    head = b[:4096].lower()
+    return (b"<html" in head) or (b"<table" in head and b"</table" in head)
+
+def _is_xlsx_zip(b: bytes) -> bool:
+    # .xlsx/.xlsm são ZIP com entradas características
     try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status() # Lança erro para códigos HTTP 4xx/5xx
-        # Lê o conteúdo binário da resposta e usa pd.read_excel
-        return pd.read_excel(io.BytesIO(response.content), sheet_name=sheet_name)
+        with zipfile.ZipFile(io.BytesIO(b)) as zf:
+            names = set(zf.namelist())
+            return {"[Content_Types].xml", "xl/workbook.xml"} <= names
+    except zipfile.BadZipFile:
+        return False
+
+# --------------------------------------
+# Leitura robusta (XLSX do GitHub Raw)
+# --------------------------------------
+@st.cache_data(show_spinner=True, ttl=3600)  # >>> cache com TTL para aliviar GitHub
+def load_data_from_github(url: str, sheet_name: str) -> pd.DataFrame:
+    """
+    Baixa bytes de um XLSX via GitHub Raw e lê a aba indicada com engine=openpyxl.
+    - Se vier HTML/CSV disfarçado, avisa claramente.
+    - Se a aba não for encontrada, tenta a 1ª aba e alerta.
+    """
+    headers = {
+        "User-Agent": "Profarma-Streamlit/1.0 (+https://github.com/oliveirafabio8813-design)",
+        "Accept": "*/*",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        raw = resp.content
+        if not raw:
+            raise ValueError("Arquivo vazio recebido do GitHub.")
+
+        # 1) HTML retornado (erro/limite do GitHub)
+        if _is_html(raw):
+            raise ValueError("O GitHub retornou HTML (provável 404/limite de taxa). Verifique a URL ou tente novamente.")
+
+        # 2) Confirma estrutura ZIP de XLSX
+        if not _is_xlsx_zip(raw):
+            # pode ser CSV ou texto plano
+            text = raw.decode("utf-8", errors="ignore")
+            if ";" in text or "," in text:
+                raise ValueError("O link retornou CSV/TEXTO, não XLSX. Baixe o arquivo correto ou troque o parser.")
+            raise ValueError("O link não parece um XLSX válido (não é um ZIP de Excel).")
+
+        # 3) Lê a planilha com openpyxl
+        bio = io.BytesIO(raw)
+        with pd.ExcelFile(bio, engine="openpyxl") as xls:
+            # sanity check da aba
+            sn_target = _normalize(sheet_name)
+            sheet_found = None
+            for sn in xls.sheet_names:
+                if _normalize(sn) == sn_target:
+                    sheet_found = sn
+                    break
+
+            if sheet_found is None:
+                # tenta a primeira aba e avisa
+                sheet_found = xls.sheet_names[0]
+                st.warning(
+                    f"Aba '{sheet_name}' não encontrada em '{url}'. "
+                    f"Usando a primeira aba do arquivo: '{sheet_found}'."
+                )
+
+            df = pd.read_excel(xls, sheet_name=sheet_found, engine="openpyxl")
+            return df
+
     except Exception as e:
         st.error(f"⚠️ Erro ao carregar dados do GitHub ({url}, Aba: {sheet_name}): {e}")
         return pd.DataFrame()
 
+# --------------------------------------
+# Conversão de horas (evita float)
+# --------------------------------------
+def hhmm_to_min(time_str):
+    """Converte 'HH:MM' (com sinal opcional '-') em minutos inteiros."""
+    if pd.isna(time_str):
+        return 0
+    s = str(time_str).strip()
+    if s in ("", "00:00", "00:00:00"):
+        return 0
+    neg = s.startswith("-")
+    if neg:
+        s = s[1:]
+    parts = s.split(":")
+    try:
+        h, m = int(parts[0]), int(parts[1])
+    except Exception:
+        return 0
+    total = h * 60 + m
+    return -total if neg else total
 
+def min_to_hhmm(total_min: int) -> str:
+    """Converte minutos inteiros em 'HH:MM' com sinal."""
+    if total_min == 0 or pd.isna(total_min):
+        return "00:00"
+    neg = total_min < 0
+    a = abs(int(total_min))
+    h, m = divmod(a, 60)
+    sign = "-" if neg else ""
+    return f"{sign}{h:02d}:{m:02d}"
+
+# --------------------------------------
+# Checks auxiliares
+# --------------------------------------
 def e_marcacoes_impar(marcacoes):
     if pd.isna(marcacoes):
         return False
     return len(str(marcacoes).strip().split()) % 2 != 0
 
-
-def convert_to_hours(time_str):
-    """Converte strings HH:MM para horas decimais, respeitando o sinal '-' inicial."""
-    if pd.isna(time_str) or str(time_str).strip() in ['00:00', '00:00:00']:
-        return 0.0
-    try:
-        is_negative = str(time_str).startswith('-')
-        if is_negative:
-            time_str = str(time_str)[1:]
-        parts = str(time_str).split(':')
-        hours = int(parts[0])
-        minutes = int(parts[1])
-        total_hours = hours + minutes / 60
-        return -total_hours if is_negative else total_hours
-    except (ValueError, IndexError):
-        return 0.0
-
-
-def format_decimal_to_hhmm(decimal_hours):
-    """Converte horas decimais para HH:MM, respeitando o sinal."""
-    if pd.isna(decimal_hours) or decimal_hours == 0:
-        return '00:00'
-
-    sinal = '-' if decimal_hours < 0 else ''
-    abs_hours = abs(decimal_hours)
-
-    horas = int(np.floor(abs_hours))
-    minutos_decimais = abs_hours - horas
-    minutos = int(round(minutos_decimais * 60))
-
-    if minutos == 60:
-        horas += 1
-        minutos = 0
-
-    return f"{sinal}{horas:02d}:{minutos:02d}"
-
-
-# --- Carregamento de Dados e Cache (AJUSTADO PARA XLSX) ---
-@st.cache_data
+# --------------------------------------
+# Carregamento + Processamento
+# --------------------------------------
+@st.cache_data(show_spinner=True, ttl=3600)
 def load_data():
-    # CHAMA A FUNÇÃO CORRIGIDA PARA XLSX
     df_ocorrencias = load_data_from_github(URL_OCORRENCIAS, SHEET_OCORRENCIAS)
     df_banco_horas = load_data_from_github(URL_BANCO_HORAS_RESUMO, SHEET_BANCO_HORAS)
 
@@ -93,340 +161,224 @@ def load_data():
         st.error("Falha ao carregar um ou ambos os DataFrames do GitHub.")
         st.stop()
 
-    # --- Processamento de Ocorrências (Mantido do original) ---
-    df_ocorrencias['Data'] = pd.to_datetime(
-        df_ocorrencias['Data'], errors='coerce', dayfirst=True)
-    df_ocorrencias['is_impar'] = df_ocorrencias['Marcacoes'].apply(
-        e_marcacoes_impar)
-    df_ocorrencias['is_sem_marcacao'] = df_ocorrencias['Ocorrencia'].isin(
-        ['Sem marcação de entrada', 'Sem marcação de saída'])
+    # Ocorrências
+    if "Data" in df_ocorrencias.columns:
+        # dayfirst=True lida com dd/mm/yyyy; coerção evita crash em formatos mistos
+        df_ocorrencias["Data"] = pd.to_datetime(df_ocorrencias["Data"], errors="coerce", dayfirst=True)
+    else:
+        st.warning("Coluna 'Data' não encontrada em Ocorrências.")
 
-    # --- Processamento de Banco de Horas (Mantido do original) ---
-    # Converte Saldo Final (mantém o sinal original)
-    df_banco_horas['SaldoFinal_Horas'] = df_banco_horas['SaldoFinal'].apply(
-        convert_to_hours)
-    # Pagamentos (deve ser positivo - Garante que é um crédito)
-    df_banco_horas['Pagamentos_Horas'] = df_banco_horas['Pagamentos'].apply(
-        convert_to_hours).abs()
-    # Descontos (deve ser negativo - Força o sinal para débito)
-    df_banco_horas['Descontos_Horas'] = - \
-        df_banco_horas['Descontos'].apply(convert_to_hours).abs()
+    df_ocorrencias["is_impar"] = df_ocorrencias["Marcacoes"].apply(e_marcacoes_impar) if "Marcacoes" in df_ocorrencias.columns else False
+    df_ocorrencias["is_sem_marcacao"] = df_ocorrencias["Ocorrencia"].isin(
+        ["Sem marcação de entrada", "Sem marcação de saída"]
+    ) if "Ocorrencia" in df_ocorrencias.columns else False
+
+    # Banco de Horas: trabalhar em minutos (evita erro de arredondamento)
+    if all(c in df_banco_horas.columns for c in ["SaldoFinal", "Pagamentos", "Descontos"]):
+        df_banco_horas["SaldoFinal_Min"]   = df_banco_horas["SaldoFinal"].apply(hhmm_to_min)
+        df_banco_horas["Pagamentos_Min"]   = df_banco_horas["Pagamentos"].apply(hhmm_to_min).abs()
+        df_banco_horas["Descontos_Min"]    = -df_banco_horas["Descontos"].apply(hhmm_to_min).abs()
+    else:
+        st.error("Colunas de horas ('SaldoFinal', 'Pagamentos', 'Descontos') não encontradas no Banco de Horas.")
+        st.stop()
 
     return df_ocorrencias, df_banco_horas
 
-
+# ---------- INÍCIO APP ----------
 df_ocorrencias, df_banco_horas = load_data()
 
-
-# --- INÍCIO DO STREAMLIT APP ---
 st.title("📊 Dashboard de Recursos Humanos Profarma")
 st.markdown('---')
 
+# KPIs Globais
+total_head_count = df_banco_horas["Matricula"].nunique() if "Matricula" in df_banco_horas.columns else 0
 
-# --- CÁLCULOS DOS TOTAIS GLOBAIS (EXISTENTES) ---
-total_head_count = df_banco_horas['Matricula'].nunique()
-
-df_ocorrencias['is_falta_nao_justificada'] = df_ocorrencias.apply(
-    lambda row: 1 if row['Ocorrencia'] == 'Falta' and row['Justificativa'] == 'Falta' else 0,
-    axis=1
+df_ocorrencias["is_falta_nao_justificada"] = df_ocorrencias.apply(
+    lambda row: 1 if row.get("Ocorrencia") == "Falta" and row.get("Justificativa") == "Falta" else 0, axis=1
 )
 
-total_faltas = df_ocorrencias['is_falta_nao_justificada'].sum()
-total_impares = df_ocorrencias['is_impar'].sum()
-total_sem_marcacao = df_ocorrencias['is_sem_marcacao'].sum()
+total_faltas = int(df_ocorrencias["is_falta_nao_justificada"].sum())
+total_impares = int(df_ocorrencias["is_impar"].sum())
+total_sem_marcacao = int(df_ocorrencias["is_sem_marcacao"].sum())
 total_marcacoes_impares = int(total_impares + total_sem_marcacao)
 
-total_bh_positivo_horas = df_banco_horas[df_banco_horas['SaldoFinal_Horas']
-                                         > 0]['SaldoFinal_Horas'].sum()
-total_bh_negativo_horas = df_banco_horas[df_banco_horas['SaldoFinal_Horas']
-                                         < 0]['SaldoFinal_Horas'].sum()
+total_bh_positivo_min = int(df_banco_horas.loc[df_banco_horas["SaldoFinal_Min"] > 0, "SaldoFinal_Min"].sum())
+total_bh_negativo_min = int(df_banco_horas.loc[df_banco_horas["SaldoFinal_Min"] < 0, "SaldoFinal_Min"].sum())
 
-# CÁLCULO DE PAGAMENTOS E DESCONTOS
-total_pagamentos_horas = df_banco_horas[df_banco_horas['Pagamentos_Horas']
-                                        > 0]['Pagamentos_Horas'].sum()
-total_descontos_horas = df_banco_horas[df_banco_horas['Descontos_Horas']
-                                       < 0]['Descontos_Horas'].sum()
+total_pagamentos_min = int(df_banco_horas.loc[df_banco_horas["Pagamentos_Min"] > 0, "Pagamentos_Min"].sum())
+total_descontos_min  = int(df_banco_horas.loc[df_banco_horas["Descontos_Min"]  < 0, "Descontos_Min"].sum())
 
-# Formatação para exibição nos KPIs
-bh_positivo_formatado = format_decimal_to_hhmm(total_bh_positivo_horas)
-bh_negativo_formatado = format_decimal_to_hhmm(total_bh_negativo_horas)
-pagamentos_formatado = format_decimal_to_hhmm(total_pagamentos_horas)
-descontos_formatado = format_decimal_to_hhmm(total_descontos_horas)
+bh_positivo_formatado = min_to_hhmm(total_bh_positivo_min)
+bh_negativo_formatado = min_to_hhmm(total_bh_negativo_min)
+pagamentos_formatado  = min_to_hhmm(total_pagamentos_min)
+descontos_formatado   = min_to_hhmm(total_descontos_min)
 
-# --- LAYOUT PROFISSIONAL ---
-# 1. Cabeçalho com Logotipo e Título
+# Cabeçalho
 col_logo, col_title, col_info = st.columns([1, 3, 1])
 with col_logo:
     try:
-        # Assumindo que a imagem 'image_ccccb7.png' está no repositório
         st.image("image_ccccb7.png", width=120)
     except FileNotFoundError:
         st.warning("Logotipo não encontrado.")
 
 with col_title:
-    st.markdown(
-        f'<h1 style="color: {COR_PRINCIPAL_VERDE}; margin-bottom: 0px;">Dashboard Profarma - Visão Geral</h1>', unsafe_allow_html=True)
+    st.markdown(f'<h1 style="color: {COR_PRINCIPAL_VERDE}; margin-bottom: 0px;">Dashboard Profarma - Visão Geral</h1>', unsafe_allow_html=True)
     st.markdown('Resumo Profissional de Ocorrências e Banco de Horas')
 
 with col_info:
-    st.metric(label="Total de Colaboradores (Head Count)",
-              value=f"{total_head_count}")
+    st.metric(label="Total de Colaboradores (Head Count)", value=f"{total_head_count}")
 
 st.markdown('---')
 
-
-# 2. KPIs de Ocorrências e Saldo de Horas
+# KPIs
 st.subheader('Indicadores Chave (KPIs)')
-
 col_kpi_1, col_kpi_2, col_kpi_3, col_kpi_4 = st.columns(4)
 
 with col_kpi_1:
-    st.metric(
-        label="Total de Faltas Não Justificadas (Período)",
-        value=f"{int(total_faltas)}",
-        delta_color="off"
-    )
+    st.metric("Total de Faltas Não Justificadas (Período)", value=f"{total_faltas}", delta_color="off")
 
 with col_kpi_2:
-    st.metric(
-        label="Total de Marcações Ímpares/Ausentes",
-        value=f"{total_marcacoes_impares}",
-        delta_color="off"
-    )
+    st.metric("Total de Marcações Ímpares/Ausentes", value=f"{total_marcacoes_impares}", delta_color="off")
 
 with col_kpi_3:
-    st.metric(
-        label="Banco de Horas Positivo (Crédito Total)",
-        value=f"**{bh_positivo_formatado}**",
-        help="Soma total das horas em saldo positivo de todos os colaboradores.",
-        delta_color="off",
-    )
+    st.metric("Banco de Horas Positivo (Crédito Total)", value=f"**{bh_positivo_formatado}**",
+              help="Soma total das horas em saldo positivo de todos os colaboradores.", delta_color="off")
 
 with col_kpi_4:
-    # Se o saldo negativo for 0, usa a cor verde, senão usa a cor de alerta
-    delta_color = "normal" if total_bh_negativo_horas < 0 else "off"
-    st.metric(
-        label="Banco de Horas Negativo (Débito Total)",
-        value=f"**{bh_negativo_formatado}**",
-        help="Soma total das horas em saldo negativo de todos os colaboradores.",
-        delta_color=delta_color
-    )
+    delta_color = "normal" if total_bh_negativo_min < 0 else "off"
+    st.metric("Banco de Horas Negativo (Débito Total)", value=f"**{bh_negativo_formatado}**",
+              help="Soma total das horas em saldo negativo de todos os colaboradores.", delta_color=delta_color)
 
 st.markdown('---')
 
-
-# 3. Gráficos de Ranking (Ocorrências, Saldo Negativo, Pagamentos/Descontos)
+# Análise por Estabelecimento
 st.subheader('Análise de Distribuição por Estabelecimento')
-
 col_chart_1, col_chart_2 = st.columns(2)
 
-# --- Coluna 1: Ocorrências (Faltas e Ímpares) ---
+# Coluna 1 — Ocorrências
 with col_chart_1:
     st.markdown('#### Top Estabelecimentos por Ocorrências')
-
-    # 1. Agrupamento por Estabelecimento (Faltas e Ímpares)
-    df_ranking_ocorrencias = df_ocorrencias.groupby('Estabelecimento').agg(
-        Total_Faltas=('is_falta_nao_justificada', 'sum'),
-        Total_Impares=('is_impar', 'sum'),
-        Total_Sem_Marcacao=('is_sem_marcacao', 'sum')
-    ).reset_index()
-
-    df_ranking_ocorrencias['Total_Ocorrencias'] = df_ranking_ocorrencias['Total_Faltas'] + \
-        df_ranking_ocorrencias['Total_Impares'] + \
-        df_ranking_ocorrencias['Total_Sem_Marcacao']
-
-    # 2. Ordenar do maior para o menor
-    df_ranking_ocorrencias = df_ranking_ocorrencias.sort_values(
-        'Total_Ocorrencias', ascending=True
-    ).tail(10)
-
-    if not df_ranking_ocorrencias.empty:
-        fig_ocorrencias = px.bar(
-            df_ranking_ocorrencias,
-            y='Estabelecimento',
-            x=['Total_Faltas', 'Total_Impares', 'Total_Sem_Marcacao'],
-            orientation='h',
-            # Usa o Total_Ocorrencias como texto
-            text='Total_Ocorrencias',
-            color_discrete_sequence=[
-                COR_ALERTA_VERMELHO, '#ffc107', '#17a2b8'],  # Cores para as categorias
-            labels={'value': 'Total de Ocorrências',
-                    'Estabelecimento': 'Estabelecimento',
-                    'variable': 'Tipo de Ocorrência'},
-            template='plotly_white'
+    if all(c in df_ocorrencias.columns for c in ["Estabelecimento", "is_falta_nao_justificada", "is_impar", "is_sem_marcacao"]):
+        df_ranking_ocorrencias = df_ocorrencias.groupby('Estabelecimento', as_index=False).agg(
+            Total_Faltas=('is_falta_nao_justificada', 'sum'),
+            Total_Impares=('is_impar', 'sum'),
+            Total_Sem_Marcacao=('is_sem_marcacao', 'sum')
         )
-
-        fig_ocorrencias.update_traces(
-            textposition='outside',
-            cliponaxis=False
+        df_ranking_ocorrencias['Total_Ocorrencias'] = (
+            df_ranking_ocorrencias['Total_Faltas'] +
+            df_ranking_ocorrencias['Total_Impares'] +
+            df_ranking_ocorrencias['Total_Sem_Marcacao']
         )
+        df_ranking_ocorrencias = df_ranking_ocorrencias.sort_values('Total_Ocorrencias', ascending=True).tail(10)
 
-        # Atualiza o layout para melhor visualização
-        fig_ocorrencias.update_layout(
-            xaxis_title=None,
-            legend_title_text='Tipo',
-            height=400,
-            uniformtext_minsize=8,
-            uniformtext_mode='hide'
-        )
-
-        st.plotly_chart(fig_ocorrencias, use_container_width=True)
+        if not df_ranking_ocorrencias.empty:
+            fig_oc = px.bar(
+                df_ranking_ocorrencias,
+                y='Estabelecimento',
+                x=['Total_Faltas', 'Total_Impares', 'Total_Sem_Marcacao'],
+                orientation='h',
+                text='Total_Ocorrencias',
+                color_discrete_sequence=[COR_ALERTA_VERMELHO, '#ffc107', '#17a2b8'],
+                labels={'value': 'Total de Ocorrências', 'Estabelecimento': 'Estabelecimento', 'variable': 'Tipo de Ocorrência'},
+                template='plotly_white'
+            )
+            fig_oc.update_traces(textposition='outside', cliponaxis=False)
+            fig_oc.update_layout(xaxis_title=None, legend_title_text='Tipo', height=400, uniformtext_minsize=8, uniformtext_mode='hide')
+            st.plotly_chart(fig_oc, use_container_width=True)
+        else:
+            st.info("Nenhuma ocorrência encontrada para exibição no ranking.")
     else:
-        st.info("Nenhuma ocorrência encontrada para exibição no ranking.")
+        st.info("Colunas necessárias não encontradas para o ranking de ocorrências.")
 
-
-# --- Coluna 2: Saldo Negativo (Débito) ---
+# Coluna 2 — BH Negativo
 with col_chart_2:
     st.markdown('#### Ranking de Débito (Saldo Negativo) no Banco de Horas')
-
-    # 1. Filtrar saldos negativos e agrupar
-    df_ranking_bh_negativo = df_banco_horas[df_banco_horas['SaldoFinal_Horas'] < 0].groupby(
-        'Estabelecimento')['SaldoFinal_Horas'].sum().reset_index(name='Total Saldo Negativo (Horas Decimais)')
-
-    # 2. Criar coluna formatada para o texto
-    df_ranking_bh_negativo['Saldo Negativo (HH:MM)'] = df_ranking_bh_negativo['Total Saldo Negativo (Horas Decimais)'].apply(
-        format_decimal_to_hhmm)
-
-    # 3. Ordenar do maior débito (mais negativo) para o menor
-    df_ranking_bh_negativo = df_ranking_bh_negativo.sort_values(
-        'Total Saldo Negativo (Horas Decimais)',
-        ascending=True
-    ).head(10)
-
-    if not df_ranking_bh_negativo.empty:
-        # A cor será mais intensa quanto mais negativo for o saldo
-        fig_bh_negativo = px.bar(
-            df_ranking_bh_negativo,
-            y='Estabelecimento',
-            x='Total Saldo Negativo (Horas Decimais)',
-            orientation='h',
-            text='Saldo Negativo (HH:MM)',
-            color='Total Saldo Negativo (Horas Decimais)',
-            color_continuous_scale=px.colors.sequential.Reds_r,
-            labels={'Total Saldo Negativo (Horas Decimais)': 'Total de Horas Negativas'},
-            template='plotly_white',
-            category_orders={
-                'Estabelecimento': df_ranking_bh_negativo['Estabelecimento'].tolist()}
+    if all(c in df_banco_horas.columns for c in ["Estabelecimento", "SaldoFinal_Min"]):
+        df_ranking_bh_neg = (
+            df_banco_horas.loc[df_banco_horas['SaldoFinal_Min'] < 0]
+            .groupby('Estabelecimento', as_index=False)['SaldoFinal_Min'].sum()
+            .rename(columns={'SaldoFinal_Min': 'Total Saldo Negativo (Minutos)'})
+            .sort_values('Total Saldo Negativo (Minutos)', ascending=True)
+            .head(10)
         )
-
-        # Ajustes para texto no topo e ocultar eixo decimal
-        fig_bh_negativo.update_traces(
-            textposition='outside',
-            cliponaxis=False
-        )
-        fig_bh_negativo.update_layout(
-            xaxis_title=None,
-            height=400,
-            uniformtext_minsize=8,
-            uniformtext_mode='hide'
-        )
-
-        st.plotly_chart(fig_bh_negativo, use_container_width=True)
+        if not df_ranking_bh_neg.empty:
+            df_ranking_bh_neg['Saldo Negativo (HH:MM)'] = df_ranking_bh_neg['Total Saldo Negativo (Minutos)'].apply(min_to_hhmm)
+            fig_bh_neg = px.bar(
+                df_ranking_bh_neg, y='Estabelecimento', x='Total Saldo Negativo (Minutos)',
+                orientation='h', text='Saldo Negativo (HH:MM)',
+                color='Total Saldo Negativo (Minutos)', color_continuous_scale=px.colors.sequential.Reds_r,
+                labels={'Total Saldo Negativo (Minutos)': 'Total de Horas Negativas (min)'},
+                template='plotly_white',
+                category_orders={'Estabelecimento': df_ranking_bh_neg['Estabelecimento'].tolist()}
+            )
+            fig_bh_neg.update_traces(textposition='outside', cliponaxis=False)
+            fig_bh_neg.update_layout(xaxis_title=None, height=400, uniformtext_minsize=8, uniformtext_mode='hide')
+            st.plotly_chart(fig_bh_neg, use_container_width=True)
+        else:
+            st.info("Nenhum saldo negativo encontrado para exibição no ranking.")
     else:
-        st.info("Nenhum saldo negativo encontrado para exibição no ranking.")
+        st.info("Colunas necessárias não encontradas para o ranking de saldo negativo.")
 
 st.markdown('---')
 
-# 4. Gráficos de Pagamentos e Descontos
+# Pagamentos e Descontos
 st.subheader('Análise de Movimentações (Pagamentos e Descontos)')
 col_mov_1, col_mov_2 = st.columns(2)
 
-# --- Coluna 1: Pagamentos (Crédito) ---
 with col_mov_1:
     st.markdown('#### Ranking de Pagamentos de Horas')
-
-    # 1. Filtrar pagamentos e agrupar (Pagamentos_Horas é sempre positivo)
-    df_ranking_pagamentos_bh = df_banco_horas[df_banco_horas['Pagamentos_Horas'] > 0].groupby(
-        'Estabelecimento')['Pagamentos_Horas'].sum().reset_index(name='Total Pagamentos (Horas Decimais)')
-
-    # 2. Criar coluna formatada para o texto
-    df_ranking_pagamentos_bh['Pagamentos (HH:MM)'] = df_ranking_pagamentos_bh['Total Pagamentos (Horas Decimais)'].apply(
-        format_decimal_to_hhmm)
-
-    # 3. Ordenar do maior para o menor pagamento
-    df_ranking_pagamentos_bh = df_ranking_pagamentos_bh.sort_values(
-        'Total Pagamentos (Horas Decimais)',
-        ascending=False
-    ).head(10)
-
-    if not df_ranking_pagamentos_bh.empty:
-        fig_bh_pagamentos = px.bar(
-            df_ranking_pagamentos_bh,
-            y='Estabelecimento',
-            x='Total Pagamentos (Horas Decimais)',
-            orientation='h',
-            text='Pagamentos (HH:MM)',
-            color='Total Pagamentos (Horas Decimais)',
-            color_continuous_scale=px.colors.sequential.Greens,
-            labels={'Total Pagamentos (Horas Decimais)': 'Total de Horas Pagas'},
-            template='plotly_white',
-            category_orders={
-                'Estabelecimento': df_ranking_pagamentos_bh['Estabelecimento'].tolist()}
+    if all(c in df_banco_horas.columns for c in ["Estabelecimento", "Pagamentos_Min"]):
+        df_pag = (
+            df_banco_horas.loc[df_banco_horas["Pagamentos_Min"] > 0]
+            .groupby('Estabelecimento', as_index=False)["Pagamentos_Min"].sum()
+            .rename(columns={"Pagamentos_Min": "Total Pagamentos (Minutos)"})
+            .sort_values("Total Pagamentos (Minutos)", ascending=False)
+            .head(10)
         )
-
-        # AJUSTES PARA TEXTO NO TOPO E OCULTAR EIXO DECIMAL
-        fig_bh_pagamentos.update_traces(
-            textposition='outside',
-            cliponaxis=False
-        )
-        fig_bh_pagamentos.update_layout(
-            xaxis_title=None,
-            height=400,
-            uniformtext_minsize=8,
-            uniformtext_mode='hide'
-        )
-
-        st.plotly_chart(fig_bh_pagamentos, use_container_width=True)
+        if not df_pag.empty:
+            df_pag["Pagamentos (HH:MM)"] = df_pag["Total Pagamentos (Minutos)"].apply(min_to_hhmm)
+            fig_pag = px.bar(
+                df_pag, y='Estabelecimento', x='Total Pagamentos (Minutos)',
+                orientation='h', text='Pagamentos (HH:MM)',
+                color='Total Pagamentos (Minutos)', color_continuous_scale=px.colors.sequential.Greens,
+                labels={'Total Pagamentos (Minutos)': 'Total de Horas Pagas (min)'},
+                template='plotly_white',
+                category_orders={'Estabelecimento': df_pag['Estabelecimento'].tolist()}
+            )
+            fig_pag.update_traces(textposition='outside', cliponaxis=False)
+            fig_pag.update_layout(xaxis_title=None, height=400, uniformtext_minsize=8, uniformtext_mode='hide')
+            st.plotly_chart(fig_pag, use_container_width=True)
+        else:
+            st.info("Nenhum pagamento de horas encontrado para exibição no ranking.")
     else:
-        st.info("Nenhum pagamento de horas encontrado para exibição no ranking.")
+        st.info("Colunas necessárias não encontradas para o ranking de pagamentos.")
 
-
-# --- Coluna 2: Descontos (Débito) ---
 with col_mov_2:
     st.markdown('#### Ranking de Descontos de Horas')
-
-    # 1. Filtrar descontos e agrupar (Descontos_Horas é sempre negativo)
-    df_ranking_descontos_bh = df_banco_horas[df_banco_horas['Descontos_Horas'] < 0].groupby(
-        'Estabelecimento')['Descontos_Horas'].sum().reset_index(name='Total Descontos (Horas Decimais)')
-
-    # 2. Criar coluna formatada para o texto
-    df_ranking_descontos_bh['Descontos (HH:MM)'] = df_ranking_descontos_bh['Total Descontos (Horas Decimais)'].apply(
-        format_decimal_to_hhmm)
-
-    # 3. Ordenar do maior débito (mais negativo) para o menor
-    df_ranking_descontos_bh = df_ranking_descontos_bh.sort_values(
-        'Total Descontos (Horas Decimais)',
-        ascending=True
-    ).head(10)
-
-    if not df_ranking_descontos_bh.empty:
-        # A cor será mais intensa quanto mais negativo for o saldo
-        fig_bh_descontos = px.bar(
-            df_ranking_descontos_bh,
-            y='Estabelecimento',
-            x='Total Descontos (Horas Decimais)',
-            orientation='h',
-            text='Descontos (HH:MM)',
-            color='Total Descontos (Horas Decimais)',
-            color_continuous_scale=px.colors.sequential.Reds_r,
-            labels={'Total Descontos (Horas Decimais)': 'Total de Horas Descontadas'},
-            template='plotly_white',
-            category_orders={
-                'Estabelecimento': df_ranking_descontos_bh['Estabelecimento'].tolist()}
+    if all(c in df_banco_horas.columns for c in ["Estabelecimento", "Descontos_Min"]):
+        df_desc = (
+            df_banco_horas.loc[df_banco_horas["Descontos_Min"] < 0]
+            .groupby('Estabelecimento', as_index=False)["Descontos_Min"].sum()
+            .rename(columns={"Descontos_Min": "Total Descontos (Minutos)"})
+            .sort_values("Total Descontos (Minutos)", ascending=True)
+            .head(10)
         )
-
-        # AJUSTES PARA TEXTO NO TOPO E OCULTAR EIXO DECIMAL
-        fig_bh_descontos.update_traces(
-            textposition='outside',
-            cliponaxis=False
-        )
-        fig_bh_descontos.update_layout(
-            xaxis_title=None,
-            height=400,
-            uniformtext_minsize=8,
-            uniformtext_mode='hide'
-        )
-
-        st.plotly_chart(fig_bh_descontos, use_container_width=True)
+        if not df_desc.empty:
+            df_desc["Descontos (HH:MM)"] = df_desc["Total Descontos (Minutos)"].apply(min_to_hhmm)
+            fig_desc = px.bar(
+                df_desc, y='Estabelecimento', x='Total Descontos (Minutos)',
+                orientation='h', text='Descontos (HH:MM)',
+                color='Total Descontos (Minutos)', color_continuous_scale=px.colors.sequential.Reds_r,
+                labels={'Total Descontos (Minutos)': 'Total de Horas Descontadas (min)'},
+                template='plotly_white',
+                category_orders={'Estabelecimento': df_desc['Estabelecimento'].tolist()}
+            )
+            fig_desc.update_traces(textposition='outside', cliponaxis=False)
+            fig_desc.update_layout(xaxis_title=None, height=400, uniformtext_minsize=8, uniformtext_mode='hide')
+            st.plotly_chart(fig_desc, use_container_width=True)
+        else:
+            st.info("Nenhum desconto de horas encontrado para exibição no ranking.")
     else:
-        st.info("Nenhum desconto de horas encontrado para exibição no ranking.")
+        st.info("Colunas necessárias não encontradas para o ranking de descontos.")
+
+
